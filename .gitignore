@@ -1,0 +1,84 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# ---------------------------------------------------------------------------
+# 本地运行数据与凭据：只在自己机器上存在，不入库
+# ---------------------------------------------------------------------------
+.devhome/
+.preview/
+.workbuddy/
+.env
+.env.*
+*.key
+*.pem
+auth.json
+**/auth.json
+
+# ---------------------------------------------------------------------------
+# 参考项目：已迁移到 E:/fanx_reference_backup/pi_cloth/（纯备份，不用 Git）
+# ---------------------------------------------------------------------------
+/pi_cloth/
+/fanx_reference_backup/
+
+# ---------------------------------------------------------------------------
+# Bun / TypeScript 后端生成物
+# ---------------------------------------------------------------------------
+daemon/node_modules/
+daemon/dist/
+daemon/coverage/
+
+# ---------------------------------------------------------------------------
+# Flutter 平台壳的生成物
+# ---------------------------------------------------------------------------
+windows/flutter/ephemeral/
+windows/flutter/generated_plugins.cmake
+windows/flutter/generated_plugin_registrant.cc
+windows/flutter/generated_plugin_registrant.h
+ios/Flutter/generated.xcconfig
+android/local.properties
+android/.gradle/
+android/.cxx/
+**/.gradle/

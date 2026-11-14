@@ -1,0 +1,1822 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
+
+import '../../core/api/daemon_client.dart';
+import '../../core/api/models.dart';
+import '../../core/theme/app_tokens.dart';
+import '../../core/ui/fanx_kit.dart';
+import '../../state/app_state.dart';
+import 'chat_markdown.dart';
+
+/// 一个 Agent 的对话面板：进入时拉状态并订阅事件流，切换 Agent 或会话时整体重建。
+///
+/// 版式是「运行日志」而不是聊天软件：助手回复走文档流（Markdown、代码块、轮次编号），
+/// 用户输入是右对齐的指令条。长回答按文档读，短指令按命令看。
+class ChatPanel extends StatefulWidget {
+  const ChatPanel({
+    super.key,
+    required this.agent,
+    this.onState,
+    this.initialState,
+  });
+
+  final Agent agent;
+  final ValueChanged<AgentState>? onState;
+  final AgentState? initialState;
+
+  @override
+  State<ChatPanel> createState() => _ChatPanelState();
+}
+
+class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
+  final _input = TextEditingController();
+  final _scroll = ScrollController();
+  final _inputFocus = FocusNode();
+
+  StreamSubscription<Map<String, dynamic>>? _subscription;
+  AgentState _state = AgentState.empty;
+  bool _loading = true;
+  String? _error;
+  bool _awayFromBottom = false;
+
+  /// 正在流式到达的正文。真实 token 增量，不是前端假打字。
+  String _streamText = '';
+  bool _thinking = false;
+
+  /// 打字机：provider 不流式时（本机网关整包返回），最终消息到达后按
+  /// 字符数平滑展开，视觉上仍像逐字输出。
+  // 必须在 initState 里创建：惰性初始化会让 dispose 里第一次触发
+  // createTicker，那时元素已 deactivate，查 TickerMode 会崩。
+  late Ticker _ticker;
+  int _typingIndex = -1;
+  int _revealTotal = 0;
+  int _revealed = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = createTicker(_onTick);
+    final seed = widget.initialState;
+    if (seed != null) {
+      _state = seed;
+      _loading = false;
+    }
+    _scroll.addListener(_onScroll);
+    _bootstrap(seeded: seed != null);
+  }
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    _subscription?.cancel();
+    _scroll.removeListener(_onScroll);
+    _input.dispose();
+    _inputFocus.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// 用户往上翻的时候不要再自动拽回底部，只给一个「回到最新」的入口。
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final away = _scroll.position.maxScrollExtent - _scroll.offset > 160;
+    if (away != _awayFromBottom) {
+      setState(() => _awayFromBottom = away);
+    }
+  }
+
+  Future<void> _bootstrap({bool seeded = false}) async {
+    if (seeded) {
+      _scrollToBottom(animate: false);
+    } else {
+      try {
+        final state = await appState.client.getState(widget.agent.id);
+        if (!mounted) return;
+        setState(() {
+          _state = state;
+          _loading = false;
+        });
+        _scrollToBottom();
+      } on ApiException catch (exception) {
+        if (mounted) {
+          setState(() {
+            _error = exception.message;
+            _loading = false;
+          });
+        }
+      }
+    }
+
+    _subscription = appState.client
+        .events(widget.agent.id)
+        .listen(
+          (event) {
+            if (!mounted) return;
+            final type = event['type'];
+            final payload = event['state'];
+            if (type == 'state' && payload is Map<String, dynamic>) {
+              final next = AgentState.fromJson(payload);
+              final wasBusy = _state.busy;
+              final grew = next.messages.length > _state.messages.length;
+              setState(() {
+                _state = next;
+                // 最终消息到了，流式缓冲让位给正式消息。
+                _streamText = '';
+                _thinking = false;
+              });
+              if (wasBusy && grew && next.messages.isNotEmpty) {
+                final last = next.messages.last;
+                if (last.isAssistant &&
+                    !last.failed &&
+                    last.text.trim().isNotEmpty) {
+                  _startTyping(next.messages.length - 1, last.text);
+                }
+              }
+              if (!_awayFromBottom) _scrollToBottom();
+              widget.onState?.call(next);
+            } else if (type == 'delta' && event['text'] is String) {
+              setState(() {
+                _streamText += event['text'] as String;
+                _thinking = false;
+              });
+              if (!_awayFromBottom) _scrollToBottom();
+            } else if (type == 'thinking') {
+              setState(() => _thinking = true);
+            } else if (type == 'text_start') {
+              setState(() => _thinking = false);
+            } else if (type == 'error' && event['message'] is String) {
+              setState(() => _error = event['message'] as String);
+            }
+          },
+          onError: (Object error) {
+            if (!mounted) return;
+            setState(() => _error = '事件流断开：$error');
+          },
+        );
+  }
+
+  /// 平滑展开最新一条回复。总时长按长度收敛在 0.7–2.8s，短回复不拖沓、
+  /// 长回复也不会让人干等。
+  void _startTyping(int index, String text) {
+    final reduce = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    if (reduce) return;
+    setState(() {
+      _typingIndex = index;
+      _revealTotal = text.length;
+      _revealed = 0;
+    });
+    _ticker.stop();
+    _ticker.start();
+  }
+
+  void _onTick(Duration elapsed) {
+    if (_revealTotal <= 0) {
+      _ticker.stop();
+      return;
+    }
+    final durationMs = (700 + _revealTotal * 1.2).clamp(700, 2800).toInt();
+    final progress = (elapsed.inMilliseconds / durationMs).clamp(0.0, 1.0);
+    final eased = Curves.easeOutCubic.transform(progress);
+    final target = (_revealTotal * eased).round();
+    if (target != _revealed) setState(() => _revealed = target);
+    if (progress >= 1.0) {
+      _ticker.stop();
+      setState(() {
+        _revealTotal = 0;
+        _typingIndex = -1;
+      });
+    }
+  }
+
+  void _scrollToBottom({bool animate = true}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scroll.hasClients) return;
+      final target = _scroll.position.maxScrollExtent;
+      if (animate) {
+        _scroll.animateTo(
+          target,
+          duration: FanxMotion.base,
+          curve: FanxMotion.out,
+        );
+      } else {
+        _scroll.jumpTo(target);
+      }
+    });
+  }
+
+  Future<void> _send() async {
+    final text = _input.text.trim();
+    if (text.isEmpty || _state.busy) return;
+    _input.clear();
+    setState(() {
+      _error = null;
+      _streamText = '';
+      _thinking = false;
+    });
+    try {
+      await appState.client.sendMessage(widget.agent.id, text);
+    } on ApiException catch (exception) {
+      if (mounted) setState(() => _error = exception.message);
+    }
+    _inputFocus.requestFocus();
+    _scrollToBottom();
+  }
+
+  Future<void> _abort() async {
+    try {
+      await appState.client.runAction(widget.agent.id, 'abort');
+    } on ApiException catch (exception) {
+      if (mounted) setState(() => _error = exception.message);
+    }
+  }
+
+  /// 重试：把最后一条用户消息原样再发一次。失败消息不参与，避免叠罗汉。
+  Future<void> _retryLast() async {
+    ChatMessage? lastUser;
+    for (final message in _state.messages) {
+      if (message.isUser) lastUser = message;
+    }
+    if (lastUser == null || _state.busy) return;
+    setState(() {
+      _error = null;
+      _streamText = '';
+      _thinking = false;
+    });
+    try {
+      await appState.client.sendMessage(widget.agent.id, lastUser.text);
+    } on ApiException catch (exception) {
+      if (mounted) setState(() => _error = exception.message);
+    }
+    _scrollToBottom();
+  }
+
+  void _pickSuggestion(String text) {
+    _input.text = text;
+    _input.selection = TextSelection.collapsed(offset: text.length);
+    _inputFocus.requestFocus();
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+
+    if (_loading) return const _ChatSkeleton();
+
+    final messages = _state.messages;
+    // 模型调用失败已经由对应的消息卡片原样展示，顶部不再重复；
+    // 只有"没有留下消息的失败"（事件流断开、prompt 抛异常）才走这条横幅。
+    final hasFailureCard = messages.any((message) => message.failed);
+    final error = _error ?? (hasFailureCard ? null : _state.lastError);
+
+    return Column(
+      children: [
+        if (error != null)
+          InlineNotice(
+            message: error,
+            onDismiss: () => setState(() => _error = null),
+          ),
+        Expanded(
+          child: messages.isEmpty && !_state.busy && _streamText.isEmpty
+              ? _EmptyChat(
+                  agent: widget.agent,
+                  modelLabel: _state.modelLabel,
+                  onPick: _pickSuggestion,
+                )
+              : Stack(
+                  children: [
+                    ListView.builder(
+                      controller: _scroll,
+                      padding: const EdgeInsets.fromLTRB(
+                        FanxSpace.xl,
+                        FanxSpace.lg,
+                        FanxSpace.xl,
+                        FanxSpace.md,
+                      ),
+                      itemCount:
+                          messages.length +
+                          1 +
+                          (_streamText.isNotEmpty || _state.busy ? 1 : 0),
+                      itemBuilder: (context, index) {
+                        if (index == 0) {
+                          return _SessionStart(
+                            count: messages.length,
+                            modelLabel: _state.modelLabel,
+                          );
+                        }
+                        if (index == messages.length + 1) {
+                          return _streamText.isNotEmpty
+                              ? _StreamingMessage(
+                                  text: _streamText,
+                                  index: index + 1,
+                                )
+                              : _GeneratingRow(thinking: _thinking);
+                        }
+                        final message = messages[index - 1];
+                        return _MessageBlock(
+                          message: message,
+                          index: index,
+                          isLast: index == messages.length,
+                          reveal: index - 1 == _typingIndex && _revealTotal > 0
+                              ? _revealed
+                              : null,
+                          onRetry: index == messages.length
+                              ? () => _retryLast()
+                              : null,
+                        );
+                      },
+                    ),
+                    Positioned(
+                      right: FanxSpace.xl,
+                      bottom: FanxSpace.sm,
+                      child: IgnorePointer(
+                        ignoring: !_awayFromBottom,
+                        child: AnimatedOpacity(
+                          duration: FanxMotion.fast,
+                          opacity: _awayFromBottom ? 1 : 0,
+                          child: _JumpToLatest(onTap: () => _scrollToBottom()),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+        HairLine(color: t.border),
+        _Composer(
+          controller: _input,
+          focusNode: _inputFocus,
+          busy: _state.busy,
+          modelLabel: _state.modelLabel,
+          onSend: _send,
+          onAbort: _abort,
+        ),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 会话起点
+// ---------------------------------------------------------------------------
+
+class _SessionStart extends StatelessWidget {
+  const _SessionStart({required this.count, required this.modelLabel});
+
+  final int count;
+  final String? modelLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: FanxSpace.xl),
+      child: Row(
+        children: [
+          Expanded(child: HairLine(color: t.border)),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: FanxSpace.md),
+            child: Row(
+              children: [
+                MetaTag(
+                  'SESSION START · ${'$count'.padLeft(2, '0')} MESSAGES',
+                  size: 9,
+                  tracking: 1.6,
+                  bracket: true,
+                ),
+                if (modelLabel != null) ...[
+                  const SizedBox(width: FanxSpace.sm),
+                  Text(
+                    modelLabel!.toUpperCase(),
+                    style: context.mono(size: 8.5, color: t.textFaint),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          Expanded(child: HairLine(color: t.border)),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 消息
+// ---------------------------------------------------------------------------
+
+class _MessageBlock extends StatelessWidget {
+  const _MessageBlock({
+    required this.message,
+    required this.index,
+    required this.isLast,
+    this.onRetry,
+    this.reveal,
+  });
+
+  final ChatMessage message;
+  final int index;
+  final bool isLast;
+  final VoidCallback? onRetry;
+
+  /// 打字机进行中：只渲染前 N 个字符；null 表示整条展示。
+  final int? reveal;
+
+  @override
+  Widget build(BuildContext context) {
+    return message.isUser
+        ? _UserMessage(message: message, index: index)
+        : _AssistantMessage(
+            message: message,
+            index: index,
+            isLast: isLast,
+            onRetry: onRetry,
+            reveal: reveal,
+          );
+  }
+}
+
+/// 用户指令：右对齐的窄条，右侧一条琥珀边，和正文的左侧书脊形成对照。
+class _UserMessage extends StatelessWidget {
+  const _UserMessage({required this.message, required this.index});
+
+  final ChatMessage message;
+  final int index;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: FanxSpace.xl, left: 48),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '${message.text.length} 字',
+                style: context.mono(size: 9, color: t.textFaint),
+              ),
+              const SizedBox(width: FanxSpace.sm),
+              _CopyAction(text: message.text, compact: true),
+              const SizedBox(width: FanxSpace.xs),
+              MetaTag(
+                'YOU · ${'$index'.padLeft(2, '0')}',
+                size: 9,
+                tracking: 1.6,
+              ),
+            ],
+          ),
+          const SizedBox(height: FanxSpace.xs + 2),
+          Container(
+            constraints: const BoxConstraints(maxWidth: 640),
+            padding: const EdgeInsets.fromLTRB(
+              FanxSpace.lg,
+              FanxSpace.md,
+              FanxSpace.md + 2,
+              FanxSpace.md,
+            ),
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: t.isDark ? t.surface : t.surfaceRaised,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(FanxRadius.sm),
+                topRight: Radius.circular(FanxRadius.xs),
+                bottomLeft: Radius.circular(FanxRadius.sm),
+                bottomRight: Radius.circular(FanxRadius.xs),
+              ),
+              border: Border.all(color: t.border),
+            ),
+            // 右缘的琥珀竖条用叠层画：圆角容器不允许非均匀边框。
+            child: Stack(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(right: 2),
+                  child: SelectableText(
+                    message.text,
+                    style: context.texts.bodyLarge?.copyWith(
+                      color: t.text,
+                      height: 1.65,
+                      fontFamilyFallback: FanxFonts.fallback,
+                    ),
+                  ),
+                ),
+                Positioned(
+                  top: 0,
+                  bottom: 0,
+                  right: 0,
+                  width: 2,
+                  child: ColoredBox(color: t.accent.withValues(alpha: 0.65)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 助手回复：左侧轮次书脊 + 文档流正文。长回答按文章读，代码块自带语言标签。
+class _AssistantMessage extends StatelessWidget {
+  const _AssistantMessage({
+    required this.message,
+    required this.index,
+    required this.isLast,
+    this.onRetry,
+    this.reveal,
+  });
+
+  final ChatMessage message;
+  final int index;
+  final bool isLast;
+  final VoidCallback? onRetry;
+  final int? reveal;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final empty = message.text.trim().isEmpty;
+    final failed = message.failed;
+
+    return Padding(
+      padding: EdgeInsets.only(bottom: isLast ? FanxSpace.md : FanxSpace.xl),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 26,
+            child: Column(
+              children: [
+                Text(
+                  '$index'.padLeft(2, '0'),
+                  style: context.mono(size: 9, color: t.textFaint),
+                ),
+                const SizedBox(height: FanxSpace.xs + 1),
+                Container(
+                  width: 16,
+                  height: 16,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: message.pending ? t.accentWash : Colors.transparent,
+                    border: Border.all(
+                      color: message.pending
+                          ? t.accent
+                          : t.accent.withValues(alpha: 0.55),
+                    ),
+                    borderRadius: BorderRadius.circular(FanxRadius.xs),
+                  ),
+                  child: Icon(Icons.auto_awesome, size: 9, color: t.accent),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: FanxSpace.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    MetaTag(
+                      message.pending
+                          ? 'ASSISTANT · GENERATING'
+                          : failed
+                          ? 'ASSISTANT · FAILED'
+                          : 'ASSISTANT',
+                      size: 9,
+                      tracking: 1.7,
+                      color: message.pending
+                          ? t.accent
+                          : failed
+                          ? t.danger
+                          : t.textFaint,
+                    ),
+                    if (message.pending) ...[
+                      const SizedBox(width: FanxSpace.sm),
+                      FanxSpinner(size: 10),
+                    ],
+                    const Spacer(),
+                    if (!empty && !failed)
+                      Text(
+                        '${message.text.length} 字',
+                        style: context.mono(size: 9, color: t.textFaint),
+                      ),
+                    if (!empty && !failed) ...[
+                      const SizedBox(width: FanxSpace.xs),
+                      _CopyAction(text: message.text, compact: true),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: FanxSpace.xs + 2),
+                ConstrainedBox(
+                  // 正文行宽控制在 760：再宽就成了"读不到的横排"。
+                  constraints: const BoxConstraints(maxWidth: 760),
+                  child: Container(
+                    padding: const EdgeInsets.only(left: FanxSpace.lg),
+                    decoration: BoxDecoration(
+                      border: Border(
+                        left: BorderSide(
+                          color: message.pending
+                              ? t.accent.withValues(alpha: 0.5)
+                              : t.border,
+                        ),
+                      ),
+                    ),
+                    child: failed
+                        ? _FailureBlock(message: message, onRetry: onRetry)
+                        : message.pending && empty
+                        ? const _Thinking()
+                        : ChatMarkdown(
+                            text: empty
+                                ? '（空回复）'
+                                : reveal == null
+                                ? message.text
+                                : message.text.substring(
+                                    0,
+                                    reveal!.clamp(0, message.text.length),
+                                  ),
+                          ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 生成中的占位：三行渐隐骨架，比一个转圈更能说明"正在写"。
+class _GeneratingRow extends StatelessWidget {
+  const _GeneratingRow({this.thinking = false});
+
+  final bool thinking;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: FanxSpace.lg),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(
+            width: 26,
+            child: Padding(
+              padding: EdgeInsets.only(top: 4),
+              child: FanxSpinner(size: 12),
+            ),
+          ),
+          SizedBox(width: FanxSpace.sm),
+          Expanded(child: _Thinking(label: thinking ? '模型在思考…' : '正在生成…')),
+        ],
+      ),
+    );
+  }
+}
+
+/// 流式消息：正文随 token 到达逐段长出，这就是"打字机"。
+class _StreamingMessage extends StatelessWidget {
+  const _StreamingMessage({required this.text, required this.index});
+
+  final String text;
+  final int index;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: FanxSpace.lg),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 26,
+            child: Column(
+              children: [
+                Text(
+                  '$index'.padLeft(2, '0'),
+                  style: context.mono(size: 9, color: t.textFaint),
+                ),
+                const SizedBox(height: FanxSpace.xs + 1),
+                Container(
+                  width: 16,
+                  height: 16,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: t.accentWash,
+                    border: Border.all(color: t.accent),
+                    borderRadius: BorderRadius.circular(FanxRadius.xs),
+                  ),
+                  child: Icon(Icons.auto_awesome, size: 9, color: t.accent),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: FanxSpace.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    MetaTag(
+                      'ASSISTANT · STREAMING',
+                      size: 9,
+                      tracking: 1.7,
+                      color: t.accent,
+                    ),
+                    const SizedBox(width: FanxSpace.sm),
+                    StatusDot(color: t.accent, pulsing: true, size: 5),
+                    const Spacer(),
+                    Text(
+                      '${text.length} 字',
+                      style: context.mono(size: 9, color: t.textFaint),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: FanxSpace.xs + 2),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 760),
+                  child: Container(
+                    padding: const EdgeInsets.only(left: FanxSpace.lg),
+                    decoration: BoxDecoration(
+                      border: Border(
+                        left: BorderSide(
+                          color: t.accent.withValues(alpha: 0.5),
+                        ),
+                      ),
+                    ),
+                    child: ChatMarkdown(text: text),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Thinking extends StatelessWidget {
+  const _Thinking({this.label = '正在生成…'});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: context.mono(size: 10, color: t.textMuted)),
+        const SizedBox(height: FanxSpace.sm),
+        const SkeletonBox(height: 10, width: double.infinity),
+        const SizedBox(height: 7),
+        const SkeletonBox(
+          height: 10,
+          width: double.infinity,
+          delay: Duration(milliseconds: 140),
+        ),
+        const SizedBox(height: 7),
+        const SkeletonBox(
+          height: 10,
+          width: 200,
+          delay: Duration(milliseconds: 280),
+        ),
+      ],
+    );
+  }
+}
+
+/// 失败卡片：原样摆出 pi 的报错，再补一句能行动的话。
+class _FailureBlock extends StatelessWidget {
+  const _FailureBlock({required this.message, this.onRetry});
+
+  final ChatMessage message;
+  final VoidCallback? onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final raw = message.errorMessage?.trim();
+    final hint = message.errorHint;
+    final endpoint = [
+      message.provider,
+      message.model,
+    ].whereType<String>().where((value) => value.isNotEmpty).join(' / ');
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(
+        FanxSpace.md,
+        FanxSpace.md,
+        FanxSpace.md,
+        FanxSpace.sm,
+      ),
+      decoration: BoxDecoration(
+        color: t.danger.withValues(alpha: t.isDark ? 0.10 : 0.05),
+        border: Border(
+          left: BorderSide(color: t.danger, width: 2),
+          top: BorderSide(color: t.danger.withValues(alpha: 0.25)),
+          right: BorderSide(color: t.danger.withValues(alpha: 0.25)),
+          bottom: BorderSide(color: t.danger.withValues(alpha: 0.25)),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.error_outline, size: 13, color: t.danger),
+              const SizedBox(width: FanxSpace.xs + 1),
+              Text(
+                '模型调用失败',
+                style: context.texts.titleSmall?.copyWith(
+                  fontSize: 12,
+                  color: t.danger,
+                ),
+              ),
+              const Spacer(),
+              if (message.durationMs != null)
+                Text(
+                  '${(message.durationMs! / 1000).toStringAsFixed(1)} s',
+                  style: context.mono(size: 9, color: t.textFaint),
+                ),
+            ],
+          ),
+          const SizedBox(height: FanxSpace.sm),
+          SelectableText(
+            raw == null || raw.isEmpty ? 'pi 没有返回具体原因，只给了一条空消息。' : raw,
+            style: context
+                .mono(size: 11, color: t.text, weight: FontWeight.w400)
+                .copyWith(height: 1.6),
+          ),
+          if (hint != null) ...[
+            const SizedBox(height: FanxSpace.sm),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 1),
+                  child: Icon(
+                    Icons.subdirectory_arrow_right,
+                    size: 12,
+                    color: t.danger,
+                  ),
+                ),
+                const SizedBox(width: FanxSpace.xs),
+                Expanded(
+                  child: Text(
+                    hint,
+                    style: context.texts.bodySmall?.copyWith(
+                      fontSize: 11.5,
+                      color: t.text,
+                      height: 1.5,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: FanxSpace.sm),
+          Row(
+            children: [
+              if (endpoint.isNotEmpty)
+                Flexible(
+                  child: Text(
+                    endpoint,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: context.mono(size: 9, color: t.textFaint),
+                  ),
+                ),
+              const Spacer(),
+              _MiniAction(
+                icon: Icons.content_copy,
+                label: '复制错误',
+                onTap: () =>
+                    Clipboard.setData(ClipboardData(text: raw ?? '模型调用失败')),
+              ),
+              if (onRetry != null) ...[
+                const SizedBox(width: FanxSpace.xs),
+                _MiniAction(
+                  icon: Icons.refresh,
+                  label: '重试',
+                  accent: true,
+                  onTap: onRetry!,
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MiniAction extends StatefulWidget {
+  const _MiniAction({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.accent = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool accent;
+
+  @override
+  State<_MiniAction> createState() => _MiniActionState();
+}
+
+class _MiniActionState extends State<_MiniAction> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final base = widget.accent ? t.accent : t.textMuted;
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: FanxMotion.fast,
+          padding: const EdgeInsets.symmetric(
+            horizontal: FanxSpace.sm,
+            vertical: 3,
+          ),
+          decoration: BoxDecoration(
+            color: _hover ? base.withValues(alpha: 0.10) : Colors.transparent,
+            borderRadius: BorderRadius.circular(FanxRadius.xs),
+            border: Border.all(
+              color: _hover ? base.withValues(alpha: 0.5) : t.border,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(widget.icon, size: 11, color: base),
+              const SizedBox(width: FanxSpace.xs),
+              Text(widget.label, style: context.mono(size: 9.5, color: base)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CopyAction extends StatefulWidget {
+  const _CopyAction({required this.text, this.compact = false});
+
+  final String text;
+  final bool compact;
+
+  @override
+  State<_CopyAction> createState() => _CopyActionState();
+}
+
+class _CopyActionState extends State<_CopyAction> {
+  bool _hover = false;
+  bool _copied = false;
+
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: widget.text));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
+    if (mounted) setState(() => _copied = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final color = _copied ? t.success : (_hover ? t.text : t.textFaint);
+
+    return Tooltip(
+      message: _copied ? '已复制' : '复制这段内容',
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          onTap: _copy,
+          child: Container(
+            width: 22,
+            height: 20,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: _hover ? t.surfaceRaised : Colors.transparent,
+              borderRadius: BorderRadius.circular(FanxRadius.xs),
+            ),
+            child: Icon(
+              _copied ? Icons.check : Icons.content_copy,
+              size: widget.compact ? 10 : 12,
+              color: color,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _JumpToLatest extends StatelessWidget {
+  const _JumpToLatest({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: FanxSpace.md,
+            vertical: FanxSpace.sm,
+          ),
+          decoration: BoxDecoration(
+            color: t.surfaceRaised,
+            borderRadius: BorderRadius.circular(FanxRadius.sm),
+            border: Border.all(color: t.borderStrong),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: t.isDark ? 0.4 : 0.10),
+                blurRadius: 12,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('回到最新', style: context.mono(size: 10, color: t.textMuted)),
+              const SizedBox(width: FanxSpace.xs),
+              Icon(Icons.arrow_downward, size: 12, color: t.accent),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 输入区
+// ---------------------------------------------------------------------------
+
+class _Composer extends StatefulWidget {
+  const _Composer({
+    required this.controller,
+    required this.focusNode,
+    required this.busy,
+    required this.modelLabel,
+    required this.onSend,
+    required this.onAbort,
+  });
+
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final bool busy;
+  final String? modelLabel;
+  final Future<void> Function() onSend;
+  final Future<void> Function() onAbort;
+
+  @override
+  State<_Composer> createState() => _ComposerState();
+}
+
+class _ComposerState extends State<_Composer> {
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onTextChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _Composer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_onTextChanged);
+      widget.controller.addListener(_onTextChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onTextChanged);
+    super.dispose();
+  }
+
+  void _onTextChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// 回车发送。中文输入法正在拼字时不发——那一下回车是确认候选词。
+  void _onEnter() {
+    if (widget.controller.value.composing.isValid) return;
+    if (widget.controller.text.trim().isEmpty || widget.busy) return;
+    widget.onSend();
+  }
+
+  /// Ctrl / ⌘ / Shift + 回车换行：手动插到光标处，保持选择位置在换行之后。
+  void _insertNewline() {
+    final value = widget.controller.value;
+    final text = value.text;
+    final selection = value.selection;
+    final start = selection.isValid ? selection.start : text.length;
+    final end = selection.isValid ? selection.end : text.length;
+    final next = text.replaceRange(start, end, '\n');
+    widget.controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: start + 1),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final hasText = widget.controller.text.trim().isNotEmpty;
+    final canSend = hasText && !widget.busy;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        FanxSpace.xl,
+        FanxSpace.md,
+        FanxSpace.xl,
+        FanxSpace.lg,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              MetaTag('COMPOSE / 指令', size: 8.5, tracking: 1.7),
+              const Spacer(),
+              if (widget.modelLabel != null)
+                Row(
+                  children: [
+                    Icon(Icons.memory, size: 10, color: t.textFaint),
+                    const SizedBox(width: FanxSpace.xs),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 220),
+                      child: Text(
+                        widget.modelLabel!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: context.mono(size: 9, color: t.textFaint),
+                      ),
+                    ),
+                  ],
+                ),
+            ],
+          ),
+          const SizedBox(height: FanxSpace.xs + 2),
+          CallbackShortcuts(
+            bindings: {
+              // 回车直接发（最高频动作），换行走 Shift / Ctrl / ⌘ + 回车。
+              const SingleActivator(LogicalKeyboardKey.enter): _onEnter,
+              const SingleActivator(LogicalKeyboardKey.numpadEnter): _onEnter,
+              const SingleActivator(LogicalKeyboardKey.enter, shift: true):
+                  _insertNewline,
+              const SingleActivator(LogicalKeyboardKey.enter, control: true):
+                  _insertNewline,
+              const SingleActivator(LogicalKeyboardKey.enter, meta: true):
+                  _insertNewline,
+            },
+            child: _ComposerShell(
+              focusNode: widget.focusNode,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(
+                      left: FanxSpace.lg,
+                      bottom: FanxSpace.md + 4,
+                    ),
+                    child: Text(
+                      '›',
+                      style: context.mono(
+                        size: 15,
+                        color: canSend || widget.busy ? t.accent : t.textFaint,
+                        weight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: TextField(
+                      controller: widget.controller,
+                      focusNode: widget.focusNode,
+                      minLines: 1,
+                      maxLines: 8,
+                      autofocus: false,
+                      cursorWidth: 1.5,
+                      style: context.texts.bodyLarge?.copyWith(
+                        color: t.text,
+                        height: 1.6,
+                        fontFamilyFallback: FanxFonts.fallback,
+                      ),
+                      decoration: InputDecoration(
+                        filled: false,
+                        isDense: true,
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        disabledBorder: InputBorder.none,
+                        contentPadding: const EdgeInsets.fromLTRB(
+                          FanxSpace.sm,
+                          FanxSpace.md + 2,
+                          FanxSpace.sm,
+                          FanxSpace.md + 2,
+                        ),
+                        hintText: widget.busy
+                            ? '生成中…可以继续写下一句'
+                            : '给这个 Agent 一条指令',
+                        hintStyle: context.texts.bodyLarge?.copyWith(
+                          color: t.textMuted,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      FanxSpace.sm,
+                      0,
+                      FanxSpace.sm,
+                      FanxSpace.sm,
+                    ),
+                    child: _SendButton(
+                      label: widget.busy ? '停止' : '发送',
+                      icon: widget.busy
+                          ? Icons.stop_rounded
+                          : Icons.arrow_upward_rounded,
+                      tone: widget.busy ? _SendTone.stop : _SendTone.send,
+                      enabled: widget.busy || canSend,
+                      onTap: widget.busy ? widget.onAbort : widget.onSend,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: FanxSpace.sm),
+          Row(
+            children: [
+              KeyHint(
+                label: '⏎',
+                color: widget.busy ? t.border : t.borderStrong,
+              ),
+              const SizedBox(width: FanxSpace.xs + 1),
+              Text(
+                widget.busy ? '生成中，可随时停止' : '发送',
+                style: context.texts.bodySmall?.copyWith(
+                  color: widget.busy ? t.accent : t.textFaint,
+                  fontSize: 11.5,
+                ),
+              ),
+              const SizedBox(width: FanxSpace.md),
+              KeyHint(
+                label: 'SHIFT + ⏎',
+                color: widget.busy ? t.border : t.borderStrong,
+              ),
+              const SizedBox(width: FanxSpace.xs + 1),
+              Text(
+                '换行',
+                style: context.texts.bodySmall?.copyWith(
+                  color: t.textFaint,
+                  fontSize: 11.5,
+                ),
+              ),
+              const Spacer(),
+              if (hasText)
+                Text(
+                  '${widget.controller.text.length} 字',
+                  style: context.mono(size: 9.5, color: t.textFaint),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ComposerShell extends StatefulWidget {
+  const _ComposerShell({required this.focusNode, required this.child});
+
+  final FocusNode focusNode;
+  final Widget child;
+
+  @override
+  State<_ComposerShell> createState() => _ComposerShellState();
+}
+
+class _ComposerShellState extends State<_ComposerShell> {
+  bool _focused = false;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.focusNode.addListener(_onFocusChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ComposerShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.focusNode != widget.focusNode) {
+      oldWidget.focusNode.removeListener(_onFocusChanged);
+      widget.focusNode.addListener(_onFocusChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.focusNode.removeListener(_onFocusChanged);
+    super.dispose();
+  }
+
+  void _onFocusChanged() {
+    if (!mounted) return;
+    setState(() => _focused = widget.focusNode.hasFocus);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+
+    return AnimatedContainer(
+      duration: FanxMotion.fast,
+      decoration: BoxDecoration(
+        color: t.surface,
+        borderRadius: BorderRadius.circular(FanxRadius.md),
+        border: Border.all(
+          color: _focused ? t.accent.withValues(alpha: 0.7) : t.border,
+          width: _focused ? 1.4 : 1,
+        ),
+        boxShadow: _focused
+            ? [
+                BoxShadow(
+                  color: t.accent.withValues(alpha: t.isDark ? 0.10 : 0.06),
+                  blurRadius: 24,
+                  spreadRadius: -4,
+                ),
+              ]
+            : null,
+      ),
+      child: widget.child,
+    );
+  }
+}
+
+enum _SendTone { send, stop }
+
+class _SendButton extends StatefulWidget {
+  const _SendButton({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+    required this.enabled,
+    this.tone = _SendTone.send,
+  });
+
+  final String label;
+  final IconData icon;
+  final VoidCallback onTap;
+  final bool enabled;
+  final _SendTone tone;
+
+  @override
+  State<_SendButton> createState() => _SendButtonState();
+}
+
+class _SendButtonState extends State<_SendButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final isStop = widget.tone == _SendTone.stop;
+    final enabled = widget.enabled;
+    final background = !enabled
+        ? t.surfaceRaised
+        : isStop
+        ? (_hover ? t.danger : t.danger.withValues(alpha: 0.12))
+        : (_hover ? Color.lerp(t.accent, Colors.black, 0.16)! : t.accent);
+    final foreground = !enabled
+        ? t.textFaint
+        : isStop
+        ? (_hover
+              ? (t.isDark ? const Color(0xFF1A0505) : Colors.white)
+              : t.danger)
+        : t.onAccent;
+
+    return MouseRegion(
+      cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: enabled ? widget.onTap : null,
+        child: AnimatedContainer(
+          duration: FanxMotion.fast,
+          height: 32,
+          padding: const EdgeInsets.symmetric(horizontal: FanxSpace.md),
+          decoration: BoxDecoration(
+            color: background,
+            borderRadius: BorderRadius.circular(FanxRadius.sm),
+            border: Border.all(
+              color: isStop && enabled
+                  ? t.danger.withValues(alpha: 0.5)
+                  : Colors.transparent,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                widget.label,
+                style: context.texts.labelLarge?.copyWith(
+                  color: foreground,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(width: FanxSpace.xs + 1),
+              Icon(widget.icon, size: 13, color: foreground),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 空态
+// ---------------------------------------------------------------------------
+
+class _EmptyChat extends StatelessWidget {
+  const _EmptyChat({
+    required this.agent,
+    required this.modelLabel,
+    required this.onPick,
+  });
+
+  final Agent agent;
+  final String? modelLabel;
+  final ValueChanged<String> onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final initial = agent.name.isEmpty ? '?' : agent.name.characters.first;
+
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(FanxSpace.xl),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 620),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Reveal(
+                index: 0,
+                child: Row(
+                  children: [
+                    Container(
+                      width: 34,
+                      height: 34,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: t.accent,
+                        borderRadius: BorderRadius.circular(FanxRadius.sm),
+                      ),
+                      child: Text(
+                        initial,
+                        style: TextStyle(
+                          fontFamilyFallback: FanxFonts.fallback,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          color: t.onAccent,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: FanxSpace.md),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            agent.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: context.cnDisplay(size: 22, height: 1.3),
+                          ),
+                          Text(
+                            agent.description.isEmpty
+                                ? '这个会话还是空的'
+                                : agent.description,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: context.texts.bodySmall?.copyWith(
+                              fontSize: 11.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: FanxSpace.lg),
+              Reveal(
+                index: 1,
+                child: Wrap(
+                  spacing: FanxSpace.sm,
+                  runSpacing: FanxSpace.sm,
+                  children: [
+                    _Fact(icon: Icons.memory, value: modelLabel ?? '未选模型'),
+                    _Fact(
+                      icon: Icons.bolt_outlined,
+                      value: '${agent.skills} 技能',
+                    ),
+                    _Fact(
+                      icon: Icons.extension_outlined,
+                      value: '${agent.extensions} 扩展',
+                    ),
+                    _Fact(
+                      icon: Icons.article_outlined,
+                      value: '${agent.prompts} 模板',
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: FanxSpace.xl),
+              Reveal(
+                index: 2,
+                child: Row(
+                  children: [
+                    MetaTag('START WITH / 从这里开始', size: 8.5, tracking: 1.7),
+                    const SizedBox(width: FanxSpace.sm),
+                    Expanded(child: HairLine(color: t.border)),
+                  ],
+                ),
+              ),
+              const SizedBox(height: FanxSpace.sm),
+              for (var index = 0; index < _suggestions.length; index++)
+                Reveal(
+                  index: 3 + index,
+                  child: _SuggestionCard(
+                    index: index + 1,
+                    title: _suggestions[index].$1,
+                    hint: _suggestions[index].$2,
+                    onTap: () => onPick(_suggestions[index].$1),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static const List<(String, String)> _suggestions = [
+    ('先摸清这个项目的结构，给我模块边界和风险点', '适合刚接手的代码库'),
+    ('把这个流程整理成一个技能，写进我的 skills/', '把重复动作固化成能力'),
+    ('解释下面这段报错，先定位原因再给修法', '贴上报错再发送'),
+  ];
+}
+
+class _Fact extends StatelessWidget {
+  const _Fact({required this.icon, required this.value});
+
+  final IconData icon;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: FanxSpace.sm + 2,
+        vertical: FanxSpace.xs + 1,
+      ),
+      decoration: BoxDecoration(
+        color: t.surface,
+        borderRadius: BorderRadius.circular(FanxRadius.xs),
+        border: Border.all(color: t.border),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 10, color: t.textFaint),
+          const SizedBox(width: FanxSpace.xs + 1),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 200),
+            child: Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: context.mono(size: 10, color: t.textMuted),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SuggestionCard extends StatefulWidget {
+  const _SuggestionCard({
+    required this.index,
+    required this.title,
+    required this.hint,
+    required this.onTap,
+  });
+
+  final int index;
+  final String title;
+  final String hint;
+  final VoidCallback onTap;
+
+  @override
+  State<_SuggestionCard> createState() => _SuggestionCardState();
+}
+
+class _SuggestionCardState extends State<_SuggestionCard> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: FanxSpace.sm),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: FanxMotion.fast,
+            padding: const EdgeInsets.symmetric(
+              horizontal: FanxSpace.md,
+              vertical: FanxSpace.md,
+            ),
+            decoration: BoxDecoration(
+              color: _hover ? t.surfaceRaised : t.surface,
+              borderRadius: BorderRadius.circular(FanxRadius.sm),
+              border: Border.all(
+                color: _hover ? t.accent.withValues(alpha: 0.5) : t.border,
+              ),
+            ),
+            child: Row(
+              children: [
+                Text(
+                  '${widget.index}'.padLeft(2, '0'),
+                  style: context.mono(
+                    size: 10,
+                    color: _hover ? t.accent : t.textFaint,
+                  ),
+                ),
+                const SizedBox(width: FanxSpace.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: context.texts.bodyMedium?.copyWith(
+                          color: t.text,
+                          height: 1.5,
+                        ),
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        widget.hint,
+                        style: context.texts.bodySmall?.copyWith(
+                          fontSize: 10.5,
+                          color: t.textFaint,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: FanxSpace.sm),
+                Icon(
+                  Icons.north_east,
+                  size: 13,
+                  color: _hover ? t.accent : t.textFaint,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 骨架
+// ---------------------------------------------------------------------------
+
+class _ChatSkeleton extends StatelessWidget {
+  const _ChatSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(
+        FanxSpace.xl,
+        FanxSpace.lg,
+        FanxSpace.xl,
+        FanxSpace.xl,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              StatusDot(color: t.accent, pulsing: true, size: 5),
+              const SizedBox(width: FanxSpace.sm),
+              MetaTag('CONNECTING · EVENT STREAM', size: 9.5, tracking: 1.8),
+            ],
+          ),
+          const SizedBox(height: FanxSpace.lg),
+          const HairLine(),
+          for (var i = 0; i < 3; i++) ...[
+            const SizedBox(height: FanxSpace.xl),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SkeletonBox(
+                  width: 20,
+                  height: 20,
+                  radius: FanxRadius.xs,
+                  delay: Duration(milliseconds: i * 160),
+                ),
+                const SizedBox(width: FanxSpace.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SkeletonBox(
+                        width: 108,
+                        height: 9,
+                        delay: Duration(milliseconds: i * 160 + 40),
+                      ),
+                      const SizedBox(height: FanxSpace.md),
+                      SkeletonBox(
+                        width: double.infinity,
+                        height: 12,
+                        delay: Duration(milliseconds: i * 160 + 80),
+                      ),
+                      const SizedBox(height: 7),
+                      SkeletonBox(
+                        width: double.infinity,
+                        height: 12,
+                        delay: Duration(milliseconds: i * 160 + 120),
+                      ),
+                      const SizedBox(height: 7),
+                      SkeletonBox(
+                        width: 220,
+                        height: 12,
+                        delay: Duration(milliseconds: i * 160 + 160),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
