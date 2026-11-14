@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="780" viewBox="0 0 1200 780" role="img" aria-label="启动页：Agent 卡片网格">
+  <defs>
+    <clipPath id="win"><rect x="0" y="0" width="1200" height="780" rx="12"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#win)">
+    <rect width="1200" height="780" fill="#0E0E0F"/>
+
+    <!-- title bar -->
+    <rect x="0" y="0" width="1200" height="56" fill="#161618"/>
+    <path d="M0 56H1200" stroke="#2A2A2E"/>
+    <g transform="translate(24 20)">
+      <rect x="0" y="0" width="16" height="16" fill="#F4713A"/>
+      <text x="28" y="13" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" letter-spacing="1.6" fill="#F3F0EA">PI AGENT MANAGER</text>
+    </g>
+    <g font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.3" fill="#93908A">
+      <rect x="946" y="17" width="88" height="24" rx="4" fill="none" stroke="#2A2A2E"/>
+      <text x="990" y="33" text-anchor="middle">LIBRARY</text>
+      <rect x="1044" y="17" width="88" height="24" rx="4" fill="none" stroke="#2A2A2E"/>
+      <text x="1088" y="33" text-anchor="middle">REFRESH</text>
+      <circle cx="1156" cy="29" r="9" fill="none" stroke="#2A2A2E"/>
+      <path d="M1151 29a5 5 0 0 1 10 0z" fill="#93908A"/>
+    </g>
+
+    <!-- header -->
+    <text x="48" y="128" font-family="'IBM Plex Sans','Microsoft YaHei UI','PingFang SC',sans-serif" font-size="30" font-weight="700" fill="#F3F0EA">选择一个 Agent</text>
+    <text x="48" y="158" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" letter-spacing="1.2" fill="#615F5B">EACH AGENT RUNS IN ITS OWN CONFIG DIRECTORY</text>
+
+    <!-- readouts -->
+    <g>
+      <rect x="48" y="186" width="150" height="64" rx="6" fill="#161618" stroke="#2A2A2E"/>
+      <text x="68" y="216" font-family="'IBM Plex Mono', Consolas, monospace" font-size="18" fill="#F4713A">04</text>
+      <text x="68" y="234" font-family="'IBM Plex Mono', Consolas, monospace" font-size="9.5" letter-spacing="1.3" fill="#615F5B">AGENTS</text>
+
+      <rect x="212" y="186" width="150" height="64" rx="6" fill="#161618" stroke="#2A2A2E"/>
+      <text x="232" y="216" font-family="'IBM Plex Mono', Consolas, monospace" font-size="18" fill="#F3F0EA">02</text>
+      <text x="232" y="234" font-family="'IBM Plex Mono', Consolas, monospace" font-size="9.5" letter-spacing="1.3" fill="#615F5B">RUNNING</text>
+
+      <rect x="376" y="186" width="150" height="64" rx="6" fill="#161618" stroke="#2A2A2E"/>
+      <text x="396" y="216" font-family="'IBM Plex Mono', Consolas, monospace" font-size="18" fill="#4CC38A">OK</text>
+      <text x="396" y="234" font-family="'IBM Plex Mono', Consolas, monospace" font-size="9.5" letter-spacing="1.3" fill="#615F5B">DAEMON</text>
+
+      <rect x="942" y="196" width="210" height="44" rx="6" fill="#1F1F22" stroke="#3D3D43"/>
+      <text x="1047" y="223" text-anchor="middle" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" letter-spacing="1.5" fill="#F3F0EA">+ NEW AGENT</text>
+    </g>
+
+    <!-- cards -->
+    <g>
+      <!-- card 1 -->
+      <rect x="48" y="288" width="540" height="196" rx="8" fill="#161618" stroke="#2A2A2E"/>
+      <rect x="48" y="288" width="3" height="196" fill="#F4713A"/>
+      <text x="76" y="330" font-family="'IBM Plex Sans','Microsoft YaHei UI',sans-serif" font-size="21" font-weight="700" fill="#F3F0EA">前端工程师</text>
+      <circle cx="556" cy="324" r="4" fill="#4CC38A"/>
+      <text x="544" y="328" text-anchor="end" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.2" fill="#4CC38A">RUNNING</text>
+      <text x="76" y="356" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#615F5B">~/.pi-manager/agents/frontend/</text>
+      <path d="M76 374H560" stroke="#2A2A2E"/>
+      <g font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.2" fill="#615F5B">
+        <text x="76" y="404" font-size="17" fill="#F3F0EA">08</text><text x="76" y="422">SKILL</text>
+        <text x="160" y="404" font-size="17" fill="#F3F0EA">03</text><text x="160" y="422">EXT</text>
+        <text x="244" y="404" font-size="17" fill="#F3F0EA">05</text><text x="244" y="422">PROMPT</text>
+      </g>
+      <text x="76" y="460" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" fill="#615F5B">DeepSeek-V3 · 12 sessions</text>
+
+      <!-- card 2 -->
+      <rect x="612" y="288" width="540" height="196" rx="8" fill="#161618" stroke="#2A2A2E"/>
+      <text x="640" y="330" font-family="'IBM Plex Sans','Microsoft YaHei UI',sans-serif" font-size="21" font-weight="700" fill="#F3F0EA">PPT 设计师</text>
+      <circle cx="1120" cy="324" r="4" fill="#F3F0EA" fill-opacity="0.25"/>
+      <text x="1108" y="328" text-anchor="end" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.2" fill="#615F5B">IDLE</text>
+      <text x="640" y="356" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#615F5B">~/.pi-manager/agents/slides/</text>
+      <path d="M640 374H1124" stroke="#2A2A2E"/>
+      <g font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.2" fill="#615F5B">
+        <text x="640" y="404" font-size="17" fill="#F3F0EA">02</text><text x="640" y="422">SKILL</text>
+        <text x="724" y="404" font-size="17" fill="#F3F0EA">01</text><text x="724" y="422">EXT</text>
+        <text x="808" y="404" font-size="17" fill="#F3F0EA">03</text><text x="808" y="422">PROMPT</text>
+      </g>
+      <text x="640" y="460" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" fill="#615F5B">gpt-4.1 · 4 sessions</text>
+
+      <!-- card 3 -->
+      <rect x="48" y="508" width="540" height="196" rx="8" fill="#161618" stroke="#2A2A2E"/>
+      <text x="76" y="550" font-family="'IBM Plex Sans','Microsoft YaHei UI',sans-serif" font-size="21" font-weight="700" fill="#F3F0EA">代码审查</text>
+      <circle cx="556" cy="544" r="4" fill="#4CC38A"/>
+      <text x="544" y="548" text-anchor="end" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.2" fill="#4CC38A">RUNNING</text>
+      <text x="76" y="576" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#615F5B">~/.pi-manager/agents/reviewer/</text>
+      <path d="M76 594H560" stroke="#2A2A2E"/>
+      <g font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.2" fill="#615F5B">
+        <text x="76" y="624" font-size="17" fill="#F3F0EA">05</text><text x="76" y="642">SKILL</text>
+        <text x="160" y="624" font-size="17" fill="#F3F0EA">02</text><text x="160" y="642">EXT</text>
+        <text x="244" y="624" font-size="17" fill="#F3F0EA">01</text><text x="244" y="642">PROMPT</text>
+      </g>
+      <text x="76" y="680" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" fill="#615F5B">qwen3-coder · 31 sessions</text>
+
+      <!-- card 4 -->
+      <rect x="612" y="508" width="540" height="196" rx="8" fill="#161618" stroke="#2A2A2E"/>
+      <text x="640" y="550" font-family="'IBM Plex Sans','Microsoft YaHei UI',sans-serif" font-size="21" font-weight="700" fill="#F3F0EA">写作助手</text>
+      <circle cx="1120" cy="544" r="4" fill="#F3F0EA" fill-opacity="0.25"/>
+      <text x="1108" y="548" text-anchor="end" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.2" fill="#615F5B">IDLE</text>
+      <text x="640" y="576" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#615F5B">~/.pi-manager/agents/writer/</text>
+      <path d="M640 594H1124" stroke="#2A2A2E"/>
+      <g font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.2" fill="#615F5B">
+        <text x="640" y="624" font-size="17" fill="#F3F0EA">00</text><text x="640" y="642">SKILL</text>
+        <text x="724" y="624" font-size="17" fill="#F3F0EA">00</text><text x="724" y="642">EXT</text>
+        <text x="808" y="624" font-size="17" fill="#F3F0EA">06</text><text x="808" y="642">PROMPT</text>
+      </g>
+      <text x="640" y="680" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" fill="#615F5B">未配置模型</text>
+    </g>
+
+    <rect x="0" y="779" width="1200" height="1" fill="#2A2A2E"/>
+  </g>
+  <rect x="0.5" y="0.5" width="1199" height="779" rx="12" fill="none" stroke="#2A2A2E"/>
+</svg>

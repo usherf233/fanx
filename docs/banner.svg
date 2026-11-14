@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="340" viewBox="0 0 1280 340" role="img" aria-label="Pi Agent Manager">
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#1B1B1E" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F4713A" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#F4713A" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F4713A"/>
+      <stop offset="0.55" stop-color="#F4713A" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#F4713A" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="340" fill="#0E0E0F"/>
+  <rect width="1280" height="340" fill="url(#grid)"/>
+  <rect width="1280" height="340" fill="url(#glow)"/>
+  <rect x="0" y="0" width="1280" height="1" fill="url(#edge)"/>
+
+  <!-- mark -->
+  <g transform="translate(72 84)">
+    <rect x="0" y="0" width="72" height="72" rx="10" fill="#161618" stroke="#2A2A2E"/>
+    <rect x="14" y="14" width="18" height="18" fill="#F4713A"/>
+    <rect x="40" y="14" width="18" height="18" fill="#2A2A2E"/>
+    <rect x="14" y="40" width="18" height="18" fill="#2A2A2E"/>
+    <rect x="40" y="40" width="18" height="18" fill="#F4713A" fill-opacity="0.45"/>
+  </g>
+
+  <text x="176" y="112" font-family="Archivo, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="20" letter-spacing="4.8" fill="#93908A">FANX / DESKTOP</text>
+  <text x="176" y="176" font-family="Archivo, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="56" font-weight="700" letter-spacing="-1" fill="#F3F0EA">Pi Agent Manager</text>
+  <text x="178" y="216" font-family="'IBM Plex Sans','Microsoft YaHei UI','PingFang SC','Noto Sans SC',system-ui,sans-serif" font-size="20" fill="#93908A">一个 Agent 一套独立目录 · 技能 / 扩展 / 提示词 / 凭据 / 会话互不干扰</text>
+
+  <g font-family="'IBM Plex Mono', Consolas, Menlo, monospace" font-size="13" fill="#615F5B" letter-spacing="1.2">
+    <text x="178" y="272">FLUTTER</text>
+    <text x="262" y="272">+</text>
+    <text x="282" y="272">BUN</text>
+    <text x="330" y="272">+</text>
+    <text x="350" y="272">PI SDK</text>
+  </g>
+
+  <g transform="translate(1000 84)">
+    <rect x="0" y="0" width="208" height="172" rx="10" fill="#131315" stroke="#2A2A2E"/>
+    <text x="20" y="30" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" letter-spacing="1.4" fill="#615F5B">DAEMON</text>
+    <circle cx="184" cy="26" r="3.5" fill="#4CC38A"/>
+    <text x="20" y="62" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#93908A">127.0.0.1:4317</text>
+    <path d="M20 78H188" stroke="#2A2A2E"/>
+    <text x="20" y="104" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#F3F0EA">AGENTS</text>
+    <text x="188" y="104" text-anchor="end" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#F4713A">04</text>
+    <text x="20" y="128" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#F3F0EA">SKILLS</text>
+    <text x="188" y="128" text-anchor="end" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#F4713A">17</text>
+    <text x="20" y="152" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#F3F0EA">ISOLATION</text>
+    <text x="188" y="152" text-anchor="end" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#4CC38A">ON</text>
+  </g>
+</svg>

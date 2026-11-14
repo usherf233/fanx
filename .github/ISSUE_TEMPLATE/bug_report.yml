@@ -1,0 +1,74 @@
+name: Bug 报告
+description: 界面、daemon 或隔离行为不符合预期
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前先看一眼 [已知限制](https://github.com/usherf233/fanx/blob/main/docs/limitations.md)，
+        有些边界是刻意保留的。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 实际行为。有报错请原样贴出来，不要只写"报错了"。
+      placeholder: 点侧栏切换会话后，对话区仍然显示上一个会话的内容…
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 启动页新建一个 Agent
+        2. 装上任意技能
+        3. …
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响范围
+      options:
+        - 前端界面 / 路由
+        - 对话区渲染与流式
+        - daemon API
+        - Agent 隔离与资源加载
+        - 模型接入与探测
+        - 构建 / 测试
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      description: 系统版本、Flutter 版本、Bun 版本
+      placeholder: Windows 11 · Flutter 3.35 · Bun 1.2
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: daemon 终端输出、`flutter run` 输出，或失败卡片的完整报错。
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认
+      options:
+        - label: 已搜索过现有 issue，没有重复
+          required: true

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用与架构说明
+    url: https://github.com/usherf233/fanx/tree/main/docs
+    about: 先看文档：隔离机制、API 全表、设计笔记、已知限制。

@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Pi Agent Manager — social preview">
+  <defs>
+    <pattern id="g2" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#1B1B1E" stroke-width="1"/>
+    </pattern>
+    <radialGradient id="r2" cx="0.15" cy="0" r="1">
+      <stop offset="0" stop-color="#F4713A" stop-opacity="0.22"/>
+      <stop offset="0.6" stop-color="#F4713A" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="#0E0E0F"/>
+  <rect width="1280" height="640" fill="url(#g2)"/>
+  <rect width="1280" height="640" fill="url(#r2)"/>
+  <rect x="0" y="0" width="1280" height="2" fill="#F4713A"/>
+
+  <g transform="translate(96 156)">
+    <rect x="0" y="0" width="92" height="92" rx="14" fill="#161618" stroke="#2A2A2E"/>
+    <rect x="18" y="18" width="23" height="23" fill="#F4713A"/>
+    <rect x="51" y="18" width="23" height="23" fill="#2A2A2E"/>
+    <rect x="18" y="51" width="23" height="23" fill="#2A2A2E"/>
+    <rect x="51" y="51" width="23" height="23" fill="#F4713A" fill-opacity="0.45"/>
+  </g>
+
+  <text x="96" y="316" font-family="'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="72" font-weight="700" letter-spacing="-1.6" fill="#F3F0EA">Pi Agent Manager</text>
+  <text x="98" y="378" font-family="'Microsoft YaHei UI','PingFang SC','Noto Sans SC',system-ui,sans-serif" font-size="27" fill="#93908A">一个 Agent 一套独立目录</text>
+  <text x="98" y="420" font-family="'Microsoft YaHei UI','PingFang SC','Noto Sans SC',system-ui,sans-serif" font-size="27" fill="#615F5B">技能 / 扩展 / 提示词 / 凭据 / 会话互不干扰</text>
+
+  <g font-family="Consolas, Menlo, monospace" font-size="13" letter-spacing="2" fill="#615F5B">
+    <text x="98" y="492">FLUTTER · BUN · PI SDK</text>
+  </g>
+
+  <g transform="translate(860 200)">
+    <rect x="0" y="0" width="288" height="240" rx="10" fill="#131315" stroke="#2A2A2E"/>
+    <text x="24" y="40" font-family="Consolas, monospace" font-size="11" letter-spacing="1.6" fill="#615F5B">AGENTS</text>
+    <text x="264" y="40" text-anchor="end" font-family="Consolas, monospace" font-size="11" fill="#4CC38A">ONLINE</text>
+    <path d="M24 58H264" stroke="#2A2A2E"/>
+    <text x="24" y="96" font-family="Consolas, monospace" font-size="12" fill="#F3F0EA">frontend/</text>
+    <text x="264" y="96" text-anchor="end" font-family="Consolas, monospace" font-size="12" fill="#F4713A">08</text>
+    <text x="24" y="128" font-family="Consolas, monospace" font-size="12" fill="#F3F0EA">slides/</text>
+    <text x="264" y="128" text-anchor="end" font-family="Consolas, monospace" font-size="12" fill="#615F5B">02</text>
+    <text x="24" y="160" font-family="Consolas, monospace" font-size="12" fill="#F3F0EA">reviewer/</text>
+    <text x="264" y="160" text-anchor="end" font-family="Consolas, monospace" font-size="12" fill="#F4713A">05</text>
+    <text x="24" y="192" font-family="Consolas, monospace" font-size="12" fill="#F3F0EA">writer/</text>
+    <text x="264" y="192" text-anchor="end" font-family="Consolas, monospace" font-size="12" fill="#615F5B">00</text>
+    <path d="M24 212H264" stroke="#2A2A2E"/>
+    <text x="24" y="232" font-family="Consolas, monospace" font-size="10.5" letter-spacing="1.2" fill="#615F5B">ISOLATED BY DESIGN</text>
+  </g>
+</svg>

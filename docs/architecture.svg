@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="440" viewBox="0 0 1200 440" role="img" aria-label="架构：Flutter 前端 → Bun daemon → pi SDK → 独立 Agent 目录">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0l10 5-10 5z" fill="#3D3D43"/>
+    </marker>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0l10 5-10 5z" fill="#F4713A"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="440" fill="#0E0E0F"/>
+
+  <text x="40" y="46" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" letter-spacing="1.6" fill="#615F5B">ARCHITECTURE</text>
+
+  <!-- box 1 -->
+  <rect x="40" y="72" width="248" height="180" rx="8" fill="#161618" stroke="#2A2A2E"/>
+  <text x="64" y="106" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.3" fill="#F4713A">01 / FRONTEND</text>
+  <text x="64" y="140" font-family="'IBM Plex Sans','Microsoft YaHei UI',sans-serif" font-size="17" font-weight="700" fill="#F3F0EA">Flutter 桌面</text>
+  <text x="64" y="168" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#93908A">lib/</text>
+  <text x="64" y="194" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" fill="#615F5B">go_router · window_manager</text>
+  <text x="64" y="216" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" fill="#615F5B">token 化主题 · 全站等宽标签</text>
+
+  <!-- arrow -->
+  <path d="M292 162H348" stroke="#3D3D43" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="320" y="150" text-anchor="middle" font-family="'IBM Plex Mono', Consolas, monospace" font-size="9.5" fill="#615F5B">HTTP</text>
+  <text x="320" y="184" text-anchor="middle" font-family="'IBM Plex Mono', Consolas, monospace" font-size="9.5" fill="#615F5B">SSE</text>
+
+  <!-- box 2 -->
+  <rect x="352" y="72" width="268" height="180" rx="8" fill="#161618" stroke="#2A2A2E"/>
+  <text x="376" y="106" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.3" fill="#F4713A">02 / DAEMON</text>
+  <text x="376" y="140" font-family="'IBM Plex Sans','Microsoft YaHei UI',sans-serif" font-size="17" font-weight="700" fill="#F3F0EA">Bun 服务</text>
+  <text x="376" y="168" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#93908A">daemon/src/</text>
+  <text x="376" y="194" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" fill="#615F5B">127.0.0.1:4317</text>
+  <text x="376" y="216" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" fill="#615F5B">REST + SSE · 单进程多 runtime</text>
+
+  <!-- arrow -->
+  <path d="M624 162H680" stroke="#3D3D43" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="652" y="150" text-anchor="middle" font-family="'IBM Plex Mono', Consolas, monospace" font-size="9.5" fill="#615F5B">SDK</text>
+
+  <!-- box 3 -->
+  <rect x="684" y="72" width="248" height="180" rx="8" fill="#161618" stroke="#2A2A2E"/>
+  <text x="708" y="106" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.3" fill="#F4713A">03 / RUNTIME</text>
+  <text x="708" y="140" font-family="'IBM Plex Sans','Microsoft YaHei UI',sans-serif" font-size="17" font-weight="700" fill="#F3F0EA">pi SDK</text>
+  <text x="708" y="168" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#93908A">@earendil-works/pi</text>
+  <text x="708" y="194" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" fill="#615F5B">noSkills / noExtensions</text>
+  <text x="708" y="216" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" fill="#615F5B">默认发现全关，只挂当前目录</text>
+
+  <!-- arrow -->
+  <path d="M936 162H992" stroke="#F4713A" stroke-width="1.5" marker-end="url(#ar2)"/>
+
+  <!-- box 4 -->
+  <rect x="996" y="72" width="164" height="180" rx="8" fill="#131315" stroke="#3D3D43"/>
+  <text x="1020" y="106" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10" letter-spacing="1.3" fill="#F4713A">04 / DISK</text>
+  <text x="1020" y="140" font-family="'IBM Plex Mono', Consolas, monospace" font-size="11" fill="#F3F0EA">agents/</text>
+  <text x="1020" y="166" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" fill="#615F5B">frontend/</text>
+  <text x="1020" y="186" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" fill="#615F5B">slides/</text>
+  <text x="1020" y="206" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" fill="#615F5B">reviewer/</text>
+  <text x="1020" y="226" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" fill="#615F5B">writer/</text>
+
+  <!-- bottom: dir tree -->
+  <path d="M40 272H1160" stroke="#2A2A2E"/>
+  <text x="40" y="304" font-family="'IBM Plex Mono', Consolas, monospace" font-size="10.5" letter-spacing="1.6" fill="#615F5B">ONE AGENT = ONE DIRECTORY</text>
+
+  <g font-family="'IBM Plex Mono', Consolas, monospace" font-size="11.5" fill="#93908A">
+    <text x="40" y="338" fill="#F3F0EA">~/.pi-manager/agents/&lt;id&gt;/</text>
+    <text x="40" y="364">├─ AGENTS.md</text>
+    <text x="40" y="390">├─ models.json</text>
+    <text x="40" y="416">└─ skills/</text>
+
+    <text x="330" y="338" fill="#615F5B">人格 / 长期提示词</text>
+    <text x="330" y="364" fill="#615F5B">独立端点与凭据</text>
+    <text x="330" y="390" fill="#615F5B">启停 = 移动文件</text>
+    <text x="330" y="416" fill="#615F5B">skills.disabled/ 与之对称</text>
+  </g>
+
+  <g font-family="'IBM Plex Mono', Consolas, monospace" font-size="11.5" fill="#93908A">
+    <text x="700" y="338">├─ extensions/</text>
+    <text x="700" y="364">├─ prompts/</text>
+    <text x="700" y="390">├─ sessions/</text>
+    <text x="700" y="416">└─ workspace/</text>
+  </g>
+  <g font-family="'IBM Plex Mono', Consolas, monospace" font-size="11.5" fill="#615F5B">
+    <text x="880" y="338">.ts / .js 扩展</text>
+    <text x="880" y="364">.md 模板</text>
+    <text x="880" y="390">JSONL 历史</text>
+    <text x="880" y="416">默认工作目录</text>
+  </g>
+</svg>
