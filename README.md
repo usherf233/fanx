@@ -121,6 +121,7 @@ noThemes: true,
   （轻量 LaTeX：希腊字母、上下标、分数、根号、运算符、\text{}），`$5` 这类价格不会误判。
 - **流式输出**：provider 走 token 增量时按增量实时长出（`delta` 事件）；provider 不流式时，
   最终消息到达后按长度在 0.7–2.8s 内平滑展开，视觉上仍是打字机。
+  两种模式都实时渲染完整 Markdown（标题、列表、代码块、公式），不是纯文本占位。
   注意：**本机模型请求必须绕过 HTTP_PROXY**，代理会拦掉或缓冲 localhost 的 SSE——
   `index.ts` 启动时把 127.0.0.1/localhost 写进 `NO_PROXY`，否则增量事件全丢。
 - **失败即报错**：`stopReason: error` 的消息原样展示 `errorMessage` + 一句诊断 + 重试，
@@ -185,6 +186,22 @@ flutter analyze && flutter test
 `test/workspace_test.dart` 用 `MockClient` 注入假数据渲染真实工作区，
 验证会话栏读数正确、窄窗口不溢出——不依赖本机 daemon 是否在跑。
 `DaemonClient` 因此开了一个可选的 `httpClient` 参数，仅供测试注入。
+
+## 性能约定
+
+对话区是全站唯一有高频更新的地方，改动时守住三条：
+
+1. `delta` 与打字机进度只更新 `_live`（`ValueNotifier`），不调用父级 `setState`；
+   列表作为 `child` 缓存，只有末尾两项订阅 `_live`，历史消息不随 token 重建。
+2. 流式与打字机期间也渲染完整 Markdown，但必须带 `streaming: true`：
+   `MarkdownStreamParser` 以「围栏外的最后一个空行」为界，只重解析最后一个
+   未完成块，已封口的块缓存复用；正式消息走全量解析。代码高亮正则按语言只编译一次，
+   已完成块的 `MarkdownText` / `_CodeBlock` 按正文与主题缓存 span，不随每次刷新重算。
+3. 后端只推 `delta` 与精简 `state`：SDK 原始事件不透传，内容重复的 `state` 直接丢弃。
+
+长回复（超过 800 字）的增量刷新、打字机每帧推进都合并到约 30fps，
+流式正文用 `StringBuffer` 累积；`DaemonClient.events()` 用游标扫帧并跳过
+`heartbeat` / `session_event`。
 
 ## 已知限制
 

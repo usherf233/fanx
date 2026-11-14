@@ -121,10 +121,21 @@ class _WorkspacePageState extends State<WorkspacePage>
   /// 对话有产出时同步顶栏状态，并刷新侧栏的标题与条数。
   /// 状态直接用事件里带的数据，不再额外请求；列表刷新节流 2 秒。
   void _onChatActivity(AgentState state) {
+    if (!mounted) return;
+    // 顶栏只读这几个字段：只有它们真的变化才重建工作区。一轮对话里
+    // 中间的 state 事件不该把整个 TabBarView 和侧栏带着一起重建，
+    // 节流也只应该作用于列表请求，不该把状态更新一起丢掉。
+    final changed =
+        _state.busy != state.busy ||
+        _state.running != state.running ||
+        _state.modelLabel != state.modelLabel ||
+        _state.sessionId != state.sessionId ||
+        _state.lastError != state.lastError;
+    if (changed) setState(() => _state = state);
+
     final now = DateTime.now();
     if (now.difference(_lastRefresh) < const Duration(seconds: 2)) return;
     _lastRefresh = now;
-    if (mounted) setState(() => _state = state);
     _refreshSessions();
   }
 

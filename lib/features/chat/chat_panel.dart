@@ -31,6 +31,58 @@ class ChatPanel extends StatefulWidget {
   State<ChatPanel> createState() => _ChatPanelState();
 }
 
+/// 打字机按 UTF-16 code unit 推进，别把 emoji / 生僻字的代理对切成半个。
+/// 公开是为了让测试能直接覆盖代理对边界。
+String revealPrefix(String text, int reveal) {
+  var end = reveal.clamp(0, text.length);
+  if (end > 0 && end < text.length) {
+    final unit = text.codeUnitAt(end);
+    if (unit >= 0xDC00 && unit <= 0xDFFF) end -= 1;
+  }
+  return text.substring(0, end);
+}
+
+/// 高频变化的「实时区」：流式正文、思考中、打字机进度。
+/// 放进 ValueNotifier 后，token 与 Ticker 只重建最后一条消息，
+/// 不再让整个 ChatPanel（含所有历史消息）跟着 rebuild。
+class _LiveState {
+  const _LiveState({
+    required this.streamText,
+    required this.thinking,
+    required this.typingIndex,
+    required this.revealTotal,
+    required this.revealed,
+  });
+
+  final String streamText;
+  final bool thinking;
+  final int typingIndex;
+  final int revealTotal;
+  final int revealed;
+
+  static const _LiveState empty = _LiveState(
+    streamText: '',
+    thinking: false,
+    typingIndex: -1,
+    revealTotal: 0,
+    revealed: 0,
+  );
+
+  _LiveState copyWith({
+    String? streamText,
+    bool? thinking,
+    int? typingIndex,
+    int? revealTotal,
+    int? revealed,
+  }) => _LiveState(
+    streamText: streamText ?? this.streamText,
+    thinking: thinking ?? this.thinking,
+    typingIndex: typingIndex ?? this.typingIndex,
+    revealTotal: revealTotal ?? this.revealTotal,
+    revealed: revealed ?? this.revealed,
+  );
+}
+
 class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
   final _input = TextEditingController();
   final _scroll = ScrollController();
@@ -42,18 +94,23 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
   String? _error;
   bool _awayFromBottom = false;
 
-  /// 正在流式到达的正文。真实 token 增量，不是前端假打字。
-  String _streamText = '';
-  bool _thinking = false;
+  final ValueNotifier<_LiveState> _live = ValueNotifier<_LiveState>(
+    _LiveState.empty,
+  );
+
+  /// 流式正文用 StringBuffer 累积，避免 Dart 字符串 `+=` 的 O(n²) 拷贝。
+  final StringBuffer _streamBuffer = StringBuffer();
+  int _streamLength = 0;
+  DateTime _lastStreamFlush = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastRevealFlush = DateTime.fromMillisecondsSinceEpoch(0);
+  static const int _throttleFromChars = 800;
+  static const Duration _throttleInterval = Duration(milliseconds: 32);
 
   /// 打字机：provider 不流式时（本机网关整包返回），最终消息到达后按
   /// 字符数平滑展开，视觉上仍像逐字输出。
   // 必须在 initState 里创建：惰性初始化会让 dispose 里第一次触发
   // createTicker，那时元素已 deactivate，查 TickerMode 会崩。
   late Ticker _ticker;
-  int _typingIndex = -1;
-  int _revealTotal = 0;
-  int _revealed = 0;
 
   @override
   void initState() {
@@ -71,6 +128,7 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
   @override
   void dispose() {
     _ticker.dispose();
+    _live.dispose();
     _subscription?.cancel();
     _scroll.removeListener(_onScroll);
     _input.dispose();
@@ -80,9 +138,11 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
   }
 
   /// 用户往上翻的时候不要再自动拽回底部，只给一个「回到最新」的入口。
+  /// 进出各留一段回差，自动滚动时不会在阈值边缘反复切换状态。
   void _onScroll() {
     if (!_scroll.hasClients) return;
-    final away = _scroll.position.maxScrollExtent - _scroll.offset > 160;
+    final distance = _scroll.position.maxScrollExtent - _scroll.offset;
+    final away = _awayFromBottom ? distance > 80 : distance > 160;
     if (away != _awayFromBottom) {
       setState(() => _awayFromBottom = away);
     }
@@ -121,12 +181,16 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
               final next = AgentState.fromJson(payload);
               final wasBusy = _state.busy;
               final grew = next.messages.length > _state.messages.length;
-              setState(() {
-                _state = next;
-                // 最终消息到了，流式缓冲让位给正式消息。
-                _streamText = '';
-                _thinking = false;
-              });
+              // 只有最终消息到达或这一轮结束时流式缓冲才退场：一轮里
+              // 工具/agent_end 也会推 state，无条件清空会让正文倒退重来。
+              if (grew || !next.busy) {
+                _resetStream();
+                _live.value = _live.value.copyWith(
+                  streamText: '',
+                  thinking: false,
+                );
+              }
+              setState(() => _state = next);
               if (wasBusy && grew && next.messages.isNotEmpty) {
                 final last = next.messages.last;
                 if (last.isAssistant &&
@@ -138,15 +202,11 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
               if (!_awayFromBottom) _scrollToBottom();
               widget.onState?.call(next);
             } else if (type == 'delta' && event['text'] is String) {
-              setState(() {
-                _streamText += event['text'] as String;
-                _thinking = false;
-              });
-              if (!_awayFromBottom) _scrollToBottom();
+              _appendDelta(event['text'] as String);
             } else if (type == 'thinking') {
-              setState(() => _thinking = true);
+              _live.value = _live.value.copyWith(thinking: true);
             } else if (type == 'text_start') {
-              setState(() => _thinking = false);
+              _live.value = _live.value.copyWith(thinking: false);
             } else if (type == 'error' && event['message'] is String) {
               setState(() => _error = event['message'] as String);
             }
@@ -158,36 +218,72 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
         );
   }
 
+  /// token 增量：只写缓冲并更新实时区，不碰父级 setState。
+  /// 短回复逐 token 实时刷新；超过 800 字后合并到约 30fps，避免每个 token
+  /// 都重写整段正文并重新排版。最终 state 到达时会换成正式消息。
+  void _appendDelta(String text) {
+    _streamBuffer.write(text);
+    _streamLength += text.length;
+    final now = DateTime.now();
+    if (_streamLength >= _throttleFromChars &&
+        now.difference(_lastStreamFlush) < _throttleInterval) {
+      return;
+    }
+    _flushStream(now);
+  }
+
+  void _flushStream(DateTime now) {
+    _lastStreamFlush = now;
+    _live.value = _live.value.copyWith(
+      streamText: _streamBuffer.toString(),
+      thinking: false,
+    );
+    // 流式期间直接跟随内容高度，不再每 token 启动一次被打断的滚动动画。
+    if (!_awayFromBottom) _scrollToBottom(animate: false);
+  }
+
+  void _resetStream() {
+    _streamBuffer.clear();
+    _streamLength = 0;
+    _lastStreamFlush = DateTime.fromMillisecondsSinceEpoch(0);
+  }
+
   /// 平滑展开最新一条回复。总时长按长度收敛在 0.7–2.8s，短回复不拖沓、
   /// 长回复也不会让人干等。
   void _startTyping(int index, String text) {
     final reduce = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     if (reduce) return;
-    setState(() {
-      _typingIndex = index;
-      _revealTotal = text.length;
-      _revealed = 0;
-    });
+    _live.value = _live.value.copyWith(
+      typingIndex: index,
+      revealTotal: text.length,
+      revealed: 0,
+    );
+    _lastRevealFlush = DateTime.fromMillisecondsSinceEpoch(0);
     _ticker.stop();
     _ticker.start();
   }
 
   void _onTick(Duration elapsed) {
-    if (_revealTotal <= 0) {
+    final live = _live.value;
+    if (live.revealTotal <= 0) {
       _ticker.stop();
       return;
     }
-    final durationMs = (700 + _revealTotal * 1.2).clamp(700, 2800).toInt();
+    final durationMs = (700 + live.revealTotal * 1.2).clamp(700, 2800).toInt();
     final progress = (elapsed.inMilliseconds / durationMs).clamp(0.0, 1.0);
     final eased = Curves.easeOutCubic.transform(progress);
-    final target = (_revealTotal * eased).round();
-    if (target != _revealed) setState(() => _revealed = target);
+    final target = (live.revealTotal * eased).round();
+    // 打字机期间每帧都要重解析 Markdown，合并到约 30fps；
+    // 结束帧直接落到完整正文，不会卡在半截。
+    final now = DateTime.now();
+    final due = now.difference(_lastRevealFlush) >= _throttleInterval;
+    if (due && target != live.revealed) {
+      _lastRevealFlush = now;
+      _live.value = live.copyWith(revealed: target);
+    }
     if (progress >= 1.0) {
       _ticker.stop();
-      setState(() {
-        _revealTotal = 0;
-        _typingIndex = -1;
-      });
+      _live.value = _live.value.copyWith(revealTotal: 0, typingIndex: -1);
     }
   }
 
@@ -211,11 +307,9 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
     final text = _input.text.trim();
     if (text.isEmpty || _state.busy) return;
     _input.clear();
-    setState(() {
-      _error = null;
-      _streamText = '';
-      _thinking = false;
-    });
+    _resetStream();
+    _live.value = _live.value.copyWith(streamText: '', thinking: false);
+    setState(() => _error = null);
     try {
       await appState.client.sendMessage(widget.agent.id, text);
     } on ApiException catch (exception) {
@@ -240,11 +334,9 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
       if (message.isUser) lastUser = message;
     }
     if (lastUser == null || _state.busy) return;
-    setState(() {
-      _error = null;
-      _streamText = '';
-      _thinking = false;
-    });
+    _resetStream();
+    _live.value = _live.value.copyWith(streamText: '', thinking: false);
+    setState(() => _error = null);
     try {
       await appState.client.sendMessage(widget.agent.id, lastUser.text);
     } on ApiException catch (exception) {
@@ -272,6 +364,17 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
     final hasFailureCard = messages.any((message) => message.failed);
     final error = _error ?? (hasFailureCard ? null : _state.lastError);
 
+    // 列表作为 child 缓存：itemCount 不随实时状态变化，ValueNotifier 通知时
+    // ListView 本身不重建，只有订阅了 _live 的末尾两项会更新。
+    final list = _MessageList(
+      scroll: _scroll,
+      messages: messages,
+      modelLabel: _state.modelLabel,
+      busy: _state.busy,
+      live: _live,
+      onRetry: () => _retryLast(),
+    );
+
     return Column(
       children: [
         if (error != null)
@@ -280,69 +383,41 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
             onDismiss: () => setState(() => _error = null),
           ),
         Expanded(
-          child: messages.isEmpty && !_state.busy && _streamText.isEmpty
-              ? _EmptyChat(
+          child: ValueListenableBuilder<_LiveState>(
+            valueListenable: _live,
+            builder: (context, live, child) {
+              final showEmpty =
+                  messages.isEmpty &&
+                  !_state.busy &&
+                  live.streamText.isEmpty &&
+                  !live.thinking;
+              if (showEmpty) {
+                return _EmptyChat(
                   agent: widget.agent,
                   modelLabel: _state.modelLabel,
                   onPick: _pickSuggestion,
-                )
-              : Stack(
-                  children: [
-                    ListView.builder(
-                      controller: _scroll,
-                      padding: const EdgeInsets.fromLTRB(
-                        FanxSpace.xl,
-                        FanxSpace.lg,
-                        FanxSpace.xl,
-                        FanxSpace.md,
-                      ),
-                      itemCount:
-                          messages.length +
-                          1 +
-                          (_streamText.isNotEmpty || _state.busy ? 1 : 0),
-                      itemBuilder: (context, index) {
-                        if (index == 0) {
-                          return _SessionStart(
-                            count: messages.length,
-                            modelLabel: _state.modelLabel,
-                          );
-                        }
-                        if (index == messages.length + 1) {
-                          return _streamText.isNotEmpty
-                              ? _StreamingMessage(
-                                  text: _streamText,
-                                  index: index + 1,
-                                )
-                              : _GeneratingRow(thinking: _thinking);
-                        }
-                        final message = messages[index - 1];
-                        return _MessageBlock(
-                          message: message,
-                          index: index,
-                          isLast: index == messages.length,
-                          reveal: index - 1 == _typingIndex && _revealTotal > 0
-                              ? _revealed
-                              : null,
-                          onRetry: index == messages.length
-                              ? () => _retryLast()
-                              : null,
-                        );
-                      },
-                    ),
-                    Positioned(
-                      right: FanxSpace.xl,
-                      bottom: FanxSpace.sm,
-                      child: IgnorePointer(
-                        ignoring: !_awayFromBottom,
-                        child: AnimatedOpacity(
-                          duration: FanxMotion.fast,
-                          opacity: _awayFromBottom ? 1 : 0,
-                          child: _JumpToLatest(onTap: () => _scrollToBottom()),
-                        ),
+                );
+              }
+              return Stack(
+                children: [
+                  child!,
+                  Positioned(
+                    right: FanxSpace.xl,
+                    bottom: FanxSpace.sm,
+                    child: IgnorePointer(
+                      ignoring: !_awayFromBottom,
+                      child: AnimatedOpacity(
+                        duration: FanxMotion.fast,
+                        opacity: _awayFromBottom ? 1 : 0,
+                        child: _JumpToLatest(onTap: () => _scrollToBottom()),
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
+              );
+            },
+            child: list,
+          ),
         ),
         HairLine(color: t.border),
         _Composer(
@@ -354,6 +429,85 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
           onAbort: _abort,
         ),
       ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 消息列表
+// ---------------------------------------------------------------------------
+
+/// 消息列表：末尾固定留一个实时行（内容为空时收成零高度），itemCount 因此
+/// 与高频状态无关，整个 ListView 才能作为 ValueListenableBuilder 的 child 复用。
+/// 只有「实时行」和「最后一条消息」订阅 _live，历史消息不随 token 重建。
+class _MessageList extends StatelessWidget {
+  const _MessageList({
+    required this.scroll,
+    required this.messages,
+    required this.modelLabel,
+    required this.busy,
+    required this.live,
+    required this.onRetry,
+  });
+
+  final ScrollController scroll;
+  final List<ChatMessage> messages;
+  final String? modelLabel;
+  final bool busy;
+  final ValueNotifier<_LiveState> live;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.builder(
+      controller: scroll,
+      padding: const EdgeInsets.fromLTRB(
+        FanxSpace.xl,
+        FanxSpace.lg,
+        FanxSpace.xl,
+        FanxSpace.md,
+      ),
+      itemCount: messages.length + 2,
+      itemBuilder: (context, index) {
+        if (index == 0) {
+          return _SessionStart(count: messages.length, modelLabel: modelLabel);
+        }
+        if (index == messages.length + 1) {
+          return ValueListenableBuilder<_LiveState>(
+            valueListenable: live,
+            builder: (context, value, _) {
+              if (value.streamText.isNotEmpty) {
+                return _StreamingMessage(
+                  text: value.streamText,
+                  index: index + 1,
+                );
+              }
+              if (busy || value.thinking) {
+                return _GeneratingRow(thinking: value.thinking);
+              }
+              return const SizedBox.shrink();
+            },
+          );
+        }
+
+        final message = messages[index - 1];
+        if (index == messages.length) {
+          // 打字机只作用于最后一条回复。
+          return ValueListenableBuilder<_LiveState>(
+            valueListenable: live,
+            builder: (context, value, _) => _MessageBlock(
+              message: message,
+              index: index,
+              isLast: true,
+              reveal: value.typingIndex == index - 1 && value.revealTotal > 0
+                  ? value.revealed
+                  : null,
+              onRetry: onRetry,
+            ),
+          );
+        }
+        return _MessageBlock(message: message, index: index, isLast: false);
+      },
     );
   }
 }
@@ -632,15 +786,13 @@ class _AssistantMessage extends StatelessWidget {
                         ? _FailureBlock(message: message, onRetry: onRetry)
                         : message.pending && empty
                         ? const _Thinking()
+                        : reveal == null
+                        ? ChatMarkdown(text: empty ? '（空回复）' : message.text)
                         : ChatMarkdown(
                             text: empty
                                 ? '（空回复）'
-                                : reveal == null
-                                ? message.text
-                                : message.text.substring(
-                                    0,
-                                    reveal!.clamp(0, message.text.length),
-                                  ),
+                                : revealPrefix(message.text, reveal!),
+                            streaming: true,
                           ),
                   ),
                 ),
@@ -754,7 +906,9 @@ class _StreamingMessage extends StatelessWidget {
                         ),
                       ),
                     ),
-                    child: ChatMarkdown(text: text),
+                    // 流式正文同样走完整 Markdown；ChatMarkdown 的增量解析
+                    // 只重算最后一个未封口的块，已完成的块沿用缓存。
+                    child: ChatMarkdown(text: text, streaming: true),
                   ),
                 ),
               ],

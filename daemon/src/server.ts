@@ -79,10 +79,19 @@ export async function startServer(options: ServerOptions = {}) {
   const managed = new Map<string, Managed>();
   const listeners = new Map<string, Set<SseSend>>();
   const busy = new Set<string>();
+  const lastStateJson = new Map<string, string>();
 
   function broadcast(agentId: string, payload: unknown): void {
     const set = listeners.get(agentId);
     if (!set) return;
+    // 一轮对话里 message_end / agent_end / finally 会连推数份 state，每份都
+    // 带全量消息历史。内容完全相同的那几份直接丢掉，避免前端反复全量解析。
+    // 新 SSE 连接用 send() 直发，不走这里，不会因去重漏掉初始快照。
+    if ((payload as { type?: string }).type === "state") {
+      const encoded = JSON.stringify(payload);
+      if (encoded === lastStateJson.get(agentId)) return;
+      lastStateJson.set(agentId, encoded);
+    }
     for (const send of set) send(payload);
   }
 
@@ -124,7 +133,9 @@ export async function startServer(options: ServerOptions = {}) {
         return;
       }
 
-      broadcast(agentId, { type: "session_event", event });
+      // SDK 原始事件（agent_end 的全量 messages、工具入参/结果等）前端并不
+      // 消费，以前无过滤透传只是白白撑大 SSE 流、多一次 jsonDecode。
+      // 只保留下面这条精简的 state 广播。
       if (event.type === "message_end" || event.type === "agent_end") {
         const agent = getAgent(agentId);
         if (agent) broadcast(agentId, { type: "state", state: agentState(agent) });

@@ -408,26 +408,36 @@ class DaemonClient {
       throw ApiException('事件流连接失败（${response.statusCode}）');
     }
 
-    var pending = '';
+    // 未闭合的半帧用 StringBuffer 暂存，避免 `+=` 反复复制整段缓冲；
+    // 已收到的部分用游标扫描，一个 chunk 只做一次 toString。
+    final pending = StringBuffer();
     await for (final chunk in response.stream.transform(utf8.decoder)) {
-      pending += chunk;
+      pending.write(chunk);
+      final buffer = pending.toString();
+      var cursor = 0;
       while (true) {
-        final index = pending.indexOf('\n\n');
+        final index = buffer.indexOf('\n\n', cursor);
         if (index == -1) break;
-        final frame = pending.substring(0, index);
-        pending = pending.substring(index + 2);
+        final frame = buffer.substring(cursor, index);
+        cursor = index + 2;
         for (final line in frame.split('\n')) {
           if (!line.startsWith('data:')) continue;
           final payload = line.substring(5).trim();
           if (payload.isEmpty) continue;
           try {
             final decoded = jsonDecode(payload);
-            if (decoded is Map<String, dynamic>) yield decoded;
+            if (decoded is! Map<String, dynamic>) continue;
+            // 心跳与 SDK 原始事件前端不消费，不进上层分发。
+            final type = decoded['type'];
+            if (type == 'heartbeat' || type == 'session_event') continue;
+            yield decoded;
           } catch (_) {
             // 单帧解析失败跳过，不影响后续
           }
         }
       }
+      pending.clear();
+      pending.write(buffer.substring(cursor));
     }
   }
 

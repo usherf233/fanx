@@ -4,19 +4,109 @@ import 'package:flutter/services.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/ui/fanx_kit.dart';
 
+// ---------------------------------------------------------------------------
+// 流式增量解析
+// ---------------------------------------------------------------------------
+
+/// 找出「已经封口」的前缀末尾：最后一个不在代码/公式围栏内的空行之后。
+///
+/// 空行是块级结构的天然分界，之前的部分不会再被后续 token 改变。
+/// 代码块内部的空行必须跳过，否则会把一个还没写完的代码块劈成两段，
+/// 既闪烁又让缓存前缀不断变化。
+int markdownStableCut(String source) {
+  final text = source.replaceAll('\r\n', '\n');
+  final lines = text.split('\n');
+  var inFence = false;
+  var inMath = false;
+  var offset = 0;
+  var cut = 0;
+  for (var i = 0; i < lines.length; i++) {
+    final line = lines[i];
+    final trimmed = line.trimLeft();
+    final next = offset + line.length + (i + 1 < lines.length ? 1 : 0);
+    if (inFence) {
+      if (trimmed.startsWith('```')) inFence = false;
+    } else if (inMath) {
+      if (line.contains(r'$$')) inMath = false;
+    } else if (trimmed.startsWith('```')) {
+      inFence = true;
+    } else if (trimmed.startsWith(r'$$')) {
+      if (!trimmed.substring(2).contains(r'$$')) inMath = true;
+    } else if (line.trim().isEmpty) {
+      cut = next;
+    }
+    offset = next;
+  }
+  return cut;
+}
+
+/// 流式/打字机专用的增量解析器：正文是「前缀追加」的，
+/// 已封口的块只解析一次，每次只重解析最后一个未完成的块。
+class MarkdownStreamParser {
+  String _prefix = '';
+  List<MarkdownBlock> _committed = const <MarkdownBlock>[];
+
+  void reset() {
+    _prefix = '';
+    _committed = const <MarkdownBlock>[];
+  }
+
+  List<MarkdownBlock> parse(String text) {
+    final source = text.replaceAll('\r\n', '\n');
+    final cut = markdownStableCut(source);
+    if (cut <= 0) return parseMarkdown(source);
+
+    final prefix = source.substring(0, cut);
+    if (prefix != _prefix) {
+      _prefix = prefix;
+      _committed = parseMarkdown(prefix);
+    }
+    final tail = source.substring(cut);
+    if (tail.trim().isEmpty) return _committed;
+    return <MarkdownBlock>[..._committed, ...parseMarkdown(tail)];
+  }
+}
+
 /// Markdown 渲染：覆盖 Agent 回复里真正会出现的东西。
 ///
 /// 不引第三方包：标题、段落、有序/无序/嵌套/任务列表、引用、分隔线、表格、
 /// 代码块（含轻量高亮）、行内代码、粗体、斜体、删除线、链接、图片。
 /// 视觉跟全站一致——等宽读数、发丝线、单一琥珀强调色。
-class ChatMarkdown extends StatelessWidget {
-  const ChatMarkdown({super.key, required this.text});
+class ChatMarkdown extends StatefulWidget {
+  const ChatMarkdown({super.key, required this.text, this.streaming = false});
 
   final String text;
 
+  /// 流式/打字机期间启用增量解析；正式消息用全量解析拿到最终结构。
+  final bool streaming;
+
+  @override
+  State<ChatMarkdown> createState() => _ChatMarkdownState();
+}
+
+class _ChatMarkdownState extends State<ChatMarkdown> {
+  /// 解析结果只取决于正文，不取决于主题。父级因无关状态重建时，
+  /// 历史消息不必再对整篇 Markdown 做 split + 逐行正则。
+  String? _source;
+  bool? _streaming;
+  List<MarkdownBlock> _blocks = const <MarkdownBlock>[];
+  final MarkdownStreamParser _streamParser = MarkdownStreamParser();
+
   @override
   Widget build(BuildContext context) {
-    final blocks = parseMarkdown(text);
+    if (_source != widget.text || _streaming != widget.streaming) {
+      _source = widget.text;
+      if (_streaming != widget.streaming) {
+        _streaming = widget.streaming;
+        // 流式结束（或中途回退成整包消息）时丢弃增量缓存，
+        // 重新按完整正文解析，避免残留半个代码块。
+        _streamParser.reset();
+      }
+      _blocks = widget.streaming
+          ? _streamParser.parse(widget.text)
+          : parseMarkdown(widget.text);
+    }
+    final blocks = _blocks;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -105,17 +195,30 @@ class ChatMarkdown extends StatelessWidget {
 
 /// 一段文本：没有行内标记时走纯文本，避免每次都构造 TextSpan；
 /// 有标记时按 `code` / **bold** / *italic* / ~~strike~~ / [link](url) 拆 span。
-class MarkdownText extends StatelessWidget {
+///
+/// 行内解析结果按「正文 + 样式 + 主题」缓存：流式刷新时历史段落会跟着
+/// 父级 rebuild，但不必每 32ms 对同一段文字重跑一遍正则与 span 构造。
+class MarkdownText extends StatefulWidget {
   const MarkdownText({super.key, required this.text, this.style});
 
   final String text;
   final TextStyle? style;
 
   @override
+  State<MarkdownText> createState() => _MarkdownTextState();
+}
+
+class _MarkdownTextState extends State<MarkdownText> {
+  FanxTokens? _tokens;
+  String? _text;
+  TextStyle? _base;
+  List<InlineSpan>? _spans; // null 表示无行内标记，走纯文本
+
+  @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final TextStyle base =
-        style ??
+        widget.style ??
         context.texts.bodyLarge?.copyWith(
           color: t.text,
           height: 1.78,
@@ -123,13 +226,18 @@ class MarkdownText extends StatelessWidget {
         ) ??
         const TextStyle();
 
-    if (!_inlinePattern.hasMatch(text)) {
-      return SelectableText(text, style: base);
+    if (!identical(_tokens, t) || _text != widget.text || _base != base) {
+      _tokens = t;
+      _text = widget.text;
+      _base = base;
+      _spans = _inlinePattern.hasMatch(widget.text)
+          ? _inlineSpans(context, widget.text, base)
+          : null;
     }
 
-    return SelectableText.rich(
-      TextSpan(style: base, children: _inlineSpans(context, text, base)),
-    );
+    final spans = _spans;
+    if (spans == null) return SelectableText(widget.text, style: base);
+    return SelectableText.rich(TextSpan(style: base, children: spans));
   }
 }
 
@@ -445,6 +553,30 @@ class _CodeBlock extends StatefulWidget {
 class _CodeBlockState extends State<_CodeBlock> {
   bool _copied = false;
 
+  /// 高亮结果按「正文 + 语言 + 主题」缓存。流式刷新时已写完的代码块
+  /// 会跟着父级 rebuild，但不必每次都对全文重跑一遍正则与 span 构造。
+  FanxTokens? _tokens;
+  String? _code;
+  String? _language;
+  List<InlineSpan>? _spans;
+
+  List<InlineSpan> _highlight(BuildContext context) {
+    final tokens = context.tokens;
+    final cached = _spans;
+    if (cached != null &&
+        identical(_tokens, tokens) &&
+        _code == widget.code &&
+        _language == widget.language) {
+      return cached;
+    }
+    final spans = highlightCode(widget.code, widget.language, context);
+    _tokens = tokens;
+    _code = widget.code;
+    _language = widget.language;
+    _spans = spans;
+    return spans;
+  }
+
   Future<void> _copy() async {
     await Clipboard.setData(ClipboardData(text: widget.code));
     if (!mounted) return;
@@ -520,13 +652,7 @@ class _CodeBlockState extends State<_CodeBlock> {
               child: Padding(
                 padding: const EdgeInsets.all(FanxSpace.md),
                 child: SelectableText.rich(
-                  TextSpan(
-                    children: highlightCode(
-                      widget.code,
-                      widget.language,
-                      context,
-                    ),
-                  ),
+                  TextSpan(children: _highlight(context)),
                   style: context
                       .mono(size: 11.5, color: t.text, weight: FontWeight.w400)
                       .copyWith(height: 1.72),
@@ -761,6 +887,19 @@ String _langKey(String language) {
   return lang;
 }
 
+/// 每种语言只编译一次正则；代码块原来每次 rebuild 都要重拼关键字串再编译。
+final Map<String, RegExp> _highlightPatterns = <String, RegExp>{};
+
+RegExp _highlightPattern(String key) => _highlightPatterns.putIfAbsent(
+  key,
+  () => RegExp(
+    '("(?:[^"\\\\\\n]|\\\\.)*"|\'(?:[^\'\\\\\\n]|\\\\.)*\'|`(?:[^`\\\\]|\\\\.)*`)'
+    r'|(//[^\n]*|/\*[\s\S]*?\*/|#[^\n]*)'
+    r'|\b(\d+(?:\.\d+)?)\b'
+    '|\\b(${_keywords[key]!.map(RegExp.escape).join('|')})\\b',
+  ),
+);
+
 /// 轻量高亮：只上四种语义色（关键字/字符串/注释/数字），不做完整语法树。
 List<InlineSpan> highlightCode(
   String code,
@@ -769,16 +908,9 @@ List<InlineSpan> highlightCode(
 ) {
   final t = context.tokens;
   final key = _langKey(language);
-  final keywords = _keywords[key];
-  if (keywords == null) return [TextSpan(text: code)];
+  if (!_keywords.containsKey(key)) return [TextSpan(text: code)];
 
-  final pattern = RegExp(
-    '("(?:[^"\\\\\\n]|\\\\.)*"|\'(?:[^\'\\\\\\n]|\\\\.)*\'|`(?:[^`\\\\]|\\\\.)*`)'
-    r'|(//[^\n]*|/\*[\s\S]*?\*/|#[^\n]*)'
-    r'|\b(\d+(?:\.\d+)?)\b'
-    '|\\b(${keywords.map(RegExp.escape).join('|')})\\b',
-  );
-
+  final pattern = _highlightPattern(key);
   final spans = <InlineSpan>[];
   var cursor = 0;
   for (final match in pattern.allMatches(code)) {
@@ -909,6 +1041,12 @@ const Map<String, String> _mathSymbols = {
   'therefore': '∴',
 };
 
+final RegExp _latinLetter = RegExp(r'[A-Za-z]');
+final RegExp _shortVariable = RegExp(r'^[A-Za-z]{1,3}$');
+final RegExp _compactMath = RegExp(r'^[A-Za-z0-9+\-*/=<>()[\].,|!%]+$');
+final RegExp _mathOperator = RegExp(r'[+\-*/=<>^]');
+final RegExp _hasDigit = RegExp(r'\d');
+
 /// 判定 `$...$` 里的内容是不是公式。"$5 打折" 这种价格文案要放行。
 bool _looksLikeMath(String source) {
   final value = source.trim();
@@ -917,13 +1055,11 @@ bool _looksLikeMath(String source) {
     return true;
   }
   // 单个短变量名（x、n）也算
-  if (RegExp(r'^[A-Za-z]{1,3}$').hasMatch(value)) return true;
+  if (_shortVariable.hasMatch(value)) return true;
   // 紧凑表达式：数字与字母混合，或带运算符/比较符
-  if (!RegExp(r'^[A-Za-z0-9+\-*/=<>()[\].,|!%]+$').hasMatch(value)) {
-    return false;
-  }
-  return RegExp(r'[+\-*/=<>^]').hasMatch(value) ||
-      (RegExp(r'\d').hasMatch(value) && RegExp(r'[A-Za-z]').hasMatch(value));
+  if (!_compactMath.hasMatch(value)) return false;
+  return _mathOperator.hasMatch(value) ||
+      (_hasDigit.hasMatch(value) && _latinLetter.hasMatch(value));
 }
 
 /// 把 LaTeX 子集拆成 TextSpan。未知命令淡出原样显示，绝不静默吞内容。
@@ -982,7 +1118,7 @@ List<InlineSpan> buildMathSpans(
       i++;
       if (i >= latex.length) break;
       final next = latex[i];
-      if (!RegExp(r'[A-Za-z]').hasMatch(next)) {
+      if (!_latinLetter.hasMatch(next)) {
         i++;
         add(switch (next) {
           ',' || ':' || ';' => ' ',
@@ -994,7 +1130,7 @@ List<InlineSpan> buildMathSpans(
       }
 
       final start = i;
-      while (i < latex.length && RegExp(r'[A-Za-z]').hasMatch(latex[i])) {
+      while (i < latex.length && _latinLetter.hasMatch(latex[i])) {
         i++;
       }
       final cmd = latex.substring(start, i);

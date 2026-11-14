@@ -52,6 +52,99 @@ void main() {
     });
   });
 
+  group('流式增量解析', () {
+    List<String> signature(List<MarkdownBlock> blocks) => [
+      for (final block in blocks)
+        switch (block) {
+          MarkdownParagraph(:final text) => 'p:$text',
+          MarkdownHeading(:final level, :final text) => 'h$level:$text',
+          MarkdownCode(:final language, :final code) => 'c:$language:$code',
+          MarkdownQuote(:final text) => 'q:$text',
+          MarkdownMath(:final latex) => 'm:$latex',
+          MarkdownImage(:final alt, :final url) => 'i:$alt:$url',
+          MarkdownList(:final items) => 'l:${items.length}',
+          MarkdownTable(:final rows) => 't:${rows.length}',
+          MarkdownRule() => 'rule',
+        },
+    ];
+
+    test('边界跳过未闭合代码块内的空行', () {
+      const source = '开头\n\n```dart\nvoid a() {}\n\nvoid b() {}\n';
+      final cut = markdownStableCut(source);
+      expect(source.substring(0, cut), '开头\n\n');
+      expect(source.substring(cut).startsWith('```dart'), isTrue);
+    });
+
+    test('同一行闭合的公式不进入围栏状态', () {
+      const source = r'$$a+b$$' '\n\n尾段';
+      expect(markdownStableCut(source), r'$$a+b$$'.length + 2);
+    });
+
+    test('逐字符追加时增量结果与全量解析一致', () {
+      const full =
+          '# 标题\n\n第一段 **粗体**。\n\n- 一\n- 二\n\n'
+          '```dart\nvoid main() {}\n\n// 注释\n```\n\n'
+          '| 名称 | 状态 |\n| --- | --- |\n| a | ok |\n\n'
+          r'$$\frac{a}{b}$$'
+          '\n\n收尾';
+      final parser = MarkdownStreamParser();
+      for (var end = 1; end <= full.length; end++) {
+        final slice = full.substring(0, end);
+        expect(
+          signature(parser.parse(slice)),
+          signature(parseMarkdown(slice)),
+          reason: '追加到第 $end 个字符时增量结果与全量不一致',
+        );
+      }
+    });
+
+    test('打字机截断不切开 emoji 代理对', () {
+      expect(revealPrefix('A😀B', 2), 'A');
+      expect(revealPrefix('A😀B', 3), 'A😀');
+      expect(revealPrefix('abc', 99), 'abc');
+    });
+  });
+
+  testWidgets('流式模式渲染完整 Markdown 并随追加更新', (tester) async {
+    Widget host(String text) => MaterialApp(
+      theme: AppTheme.light,
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: ChatMarkdown(text: text, streaming: true),
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(host('# 流式标题\n\n正文'));
+    expect(find.text('流式标题'), findsOneWidget);
+
+    await tester.pumpWidget(
+      host('# 流式标题\n\n正文\n\n```dart\nvoid main() {}\n```'),
+    );
+    expect(find.text('DART'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('明暗主题切换后行内 span 缓存失效', (tester) async {
+    for (final theme in <ThemeData>[AppTheme.light, AppTheme.dark]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: theme,
+          home: const Scaffold(
+            body: SingleChildScrollView(
+              child: ChatMarkdown(text: '先改 **配置**，再跑 `flutter test`。'),
+            ),
+          ),
+        ),
+      );
+      expect(
+        find.textContaining('flutter test', findRichText: true),
+        findsWidgets,
+      );
+      expect(tester.takeException(), isNull);
+    }
+  });
+
   group('更多 Markdown 特性', () {
     test('表格：列数、对齐与行', () {
       final blocks = parseMarkdown(
