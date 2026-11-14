@@ -27,9 +27,11 @@ jobs:
       - run: bun run typecheck
       - run: bun run scripts/poc-isolation.ts
 
+  # 前端测试断言的是中文排版不溢出，Linux runner 没有中文字体，
+  # 字形度量差异会误报；这个项目本身就是 Windows 桌面优先，所以跑在 windows 上。
   app:
     name: app · analyze & test
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
       - uses: subosito/flutter-action@v2
@@ -38,4 +40,10 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter analyze
+      # 本机代理会拦掉 flutter_tester 的 WebSocket 握手
       - run: flutter test
+        env:
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+          http_proxy: ""
+          https_proxy: ""
