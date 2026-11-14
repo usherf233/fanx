@@ -46,12 +46,14 @@ flutter run -d windows
 工作区 /a/:id
 ├─ 顶栏    Agent 下拉菜单（切 Agent / 新建 Agent / 返回启动页）
 │          + 小菜单：对话 · 模型 · 配置 · 资源库（单个 Agent）
-├─ 左侧    会话列表：新建、切换、删除；当前会话高亮
+├─ 左侧    会话列表：新建、预览、删除；当前查看的高亮，发消息才切换
 └─ 右侧    对应功能区
 ```
 
-进工作区默认恢复**最近一次会话**；没有历史就开一个空会话。会话存在该 Agent 的 `sessions/` 下，
-是 Agent 私有的——所以换 Agent 等于换整套会话。
+进工作区默认**查看最近一次会话**（只读预览），不会立刻恢复运行中的 runtime；
+没有历史就显示空会话。点开某条会话只是看历史，**发出新消息时**才真正切到该会话并创建 runtime。
+删除会话时条目先淡化转圈，再淡出、左移、收起高度（280ms），动画走完才刷新列表。
+会话存在该 Agent 的 `sessions/` 下，是 Agent 私有的——所以换 Agent 等于换整套会话。
 
 ## 一个 Agent 长什么样
 
@@ -126,6 +128,11 @@ noThemes: true,
   `index.ts` 启动时把 127.0.0.1/localhost 写进 `NO_PROXY`，否则增量事件全丢。
 - **失败即报错**：`stopReason: error` 的消息原样展示 `errorMessage` + 一句诊断 + 重试，
   不再出现"空回复"这种掩盖原因的文案。
+- **空会话是配置铭牌**（`chat_empty.dart`）：左窄右宽的清单列出当前模型、技能、扩展/插件、
+  提示词模板的**具体名字**（带停用 / 未加载状态），底部给工作目录与总项数。没有示例提问卡片。
+  模型读 `GET /models` + `GET /resources`，不读运行时 `state`——后端在没有 runtime 时
+  （首次进入、只读预览）不返回 `model` 字段，旧界面据此写死「未选模型」是误判。
+  模型行本身是切换入口（`PUT /model`），未配置时点它会跳到「模型」标签页。
 
 ## 模型接入
 
@@ -165,10 +172,11 @@ noThemes: true,
 | PUT | `/api/agents/:id/model` | 切换默认模型（运行中会同步切换） |
 | GET | `/api/agents/:id/sessions` | 会话列表（含 `active` / `messageCount`） |
 | POST | `/api/agents/:id/sessions` | 新建会话 |
-| POST | `/api/agents/:id/sessions/:sid/activate` | 切到某个历史会话 |
+| GET | `/api/agents/:id/sessions/:sid/state` | 只读预览会话历史，不切换 runtime |
+| POST | `/api/agents/:id/sessions/:sid/activate` | 切到某个历史会话（仅在要发消息时调用） |
 | DELETE | `/api/agents/:id/sessions/:sid` | 删除会话（删当前会话会自动新建一个空的） |
 | POST | `/api/agents/:id/chat` | 发消息（202 接受，事件走 SSE） |
-| GET | `/api/agents/:id/events` | SSE 事件流 |
+| GET | `/api/agents/:id/events?session=` | SSE 事件流，按期望会话过滤（每个事件带 `sessionId`） |
 | POST | `/api/agents/:id/action` | `abort` / `new` / `reload` |
 
 ## 验证
@@ -184,7 +192,8 @@ flutter analyze && flutter test
 900/1024/1440 三种宽度不溢出、窄窗口改弹窗。
 
 `test/workspace_test.dart` 用 `MockClient` 注入假数据渲染真实工作区，
-验证会话栏读数正确、窄窗口不溢出——不依赖本机 daemon 是否在跑。
+验证「点击查看不触发 activate、发消息才切换、激活失败保留输入」、
+会话栏读数正确、窄窗口不溢出——不依赖本机 daemon 是否在跑。
 `DaemonClient` 因此开了一个可选的 `httpClient` 参数，仅供测试注入。
 
 ## 性能约定
@@ -198,6 +207,19 @@ flutter analyze && flutter test
    未完成块，已封口的块缓存复用；正式消息走全量解析。代码高亮正则按语言只编译一次，
    已完成块的 `MarkdownText` / `_CodeBlock` 按正文与主题缓存 span，不随每次刷新重算。
 3. 后端只推 `delta` 与精简 `state`：SDK 原始事件不透传，内容重复的 `state` 直接丢弃。
+4. **「查看会话」与「激活会话」分开**：点侧栏只改 `_viewSessionId`，走
+   `GET /sessions/:id/state` 只读历史（后端直接读 JSONL，不碰 runtime），命中前端
+   缓存（最近 8 个）时零请求；只有发出新消息 / 重试才调 `activateSession`，
+   此时后端才切会话。查看历史是默认行为，顶部不挂解释性提示条，
+   侧栏只用「预览 ·」轻量区分查看态与激活态。
+   SSE 订阅带 `?session=`，后端给每个事件附 `sessionId` 并按期望会话过滤，
+   预览时不会串到别的会话；激活后同一条连接自然接上 delta，无需重建面板。
+5. 后端 `createAgentRuntime` 按 cwd 复用重资源（模型凭据 / settings / skills / extensions），
+   切会话只重建 `AgentSession`；`GET /sessions` 按目录签名缓存，目录没变不重复读 JSONL；
+   只读预览按文件大小 + mtime 缓存最近 24 份历史。
+6. `/a/:id` 只有一条路由，换 Agent 时 `WorkspacePage` 的 State 会被复用：
+   `didUpdateWidget` 清空会话列表、状态缓存、查看/激活号并重新 bootstrap；
+   所有异步回调带 `_agentEpoch`，上一个 Agent 的迟到响应直接丢弃。
 
 长回复（超过 800 字）的增量刷新、打字机每帧推进都合并到约 30fps，
 流式正文用 `StringBuffer` 累积；`DaemonClient.events()` 用游标扫帧并跳过

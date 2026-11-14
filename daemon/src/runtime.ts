@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   ModelRuntime,
   SessionManager,
@@ -29,32 +29,53 @@ export function scopedResourceOptions(configDir: string) {
   };
 }
 
+type Services = Awaited<ReturnType<typeof createAgentSessionServices>>;
+
 /** 按 Agent 记录创建一套独立 runtime：独立 agentDir、独立会话目录、独立 cwd。 */
 export async function createAgentRuntime(agent: AgentRecord): Promise<AgentSessionRuntime> {
   const configDir = agent.configDir;
   const sessionsDir = join(configDir, "sessions");
   mkdirSync(sessionsDir, { recursive: true });
 
+  // SDK 的 switchSession / newSession 会对同一个 factory 反复调用，默认实现
+  // 每次都重跑 createAgentSessionServices —— 也就是重读模型凭据、重建
+  // DefaultResourceLoader 并全量重扫 skills / extensions / prompts / AGENTS.md。
+  // 这些是 cwd-bound 的只读重资源，跟"换一个会话文件"无关；按 cwd 缓存后，
+  // 切会话只重建 AgentSession 本身。资源改动仍由 session.reload() 生效。
+  const servicesByCwd = new Map<string, Promise<Services>>();
+
   return createAgentSessionRuntime(
     async (target) => {
-      const modelRuntime = await ModelRuntime.create({
-        authPath: join(configDir, "auth.json"),
-        modelsPath: join(configDir, "models.json"),
-        modelsStorePath: join(configDir, "models-store.json"),
-        allowModelNetwork: false,
-      });
+      const cwd = resolve(target.cwd);
+      let pending = servicesByCwd.get(cwd);
+      if (!pending) {
+        pending = (async (): Promise<Services> => {
+          const modelRuntime = await ModelRuntime.create({
+            authPath: join(configDir, "auth.json"),
+            modelsPath: join(configDir, "models.json"),
+            modelsStorePath: join(configDir, "models-store.json"),
+            allowModelNetwork: false,
+          });
 
-      const settingsManager = SettingsManager.create(target.cwd, configDir, {
-        projectTrusted: false,
-      });
+          const settingsManager = SettingsManager.create(cwd, configDir, {
+            projectTrusted: false,
+          });
 
-      const services = await createAgentSessionServices({
-        cwd: target.cwd,
-        agentDir: configDir,
-        settingsManager,
-        modelRuntime,
-        resourceLoaderOptions: scopedResourceOptions(configDir),
-      });
+          return createAgentSessionServices({
+            cwd,
+            agentDir: configDir,
+            settingsManager,
+            modelRuntime,
+            resourceLoaderOptions: scopedResourceOptions(configDir),
+          });
+        })().catch((error: unknown) => {
+          // 失败不能把 rejected promise 留在缓存里，否则后续切换永远失败。
+          servicesByCwd.delete(cwd);
+          throw error;
+        });
+        servicesByCwd.set(cwd, pending);
+      }
+      const services = await pending;
 
       const result = await createAgentSessionFromServices({
         services,

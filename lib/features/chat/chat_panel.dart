@@ -9,6 +9,7 @@ import '../../core/api/models.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/ui/fanx_kit.dart';
 import '../../state/app_state.dart';
+import 'chat_empty.dart';
 import 'chat_markdown.dart';
 
 /// 一个 Agent 的对话面板：进入时拉状态并订阅事件流，切换 Agent 或会话时整体重建。
@@ -21,11 +22,32 @@ class ChatPanel extends StatefulWidget {
     required this.agent,
     this.onState,
     this.initialState,
+    this.expectedSessionId,
+    this.pending = false,
+    this.preview = false,
+    this.onActivate,
+    this.onOpenModels,
   });
 
   final Agent agent;
   final ValueChanged<AgentState>? onState;
   final AgentState? initialState;
+
+  /// 当前查看的会话号。SSE 只接收属于它的事件，避免预览时串到别的会话。
+  final String? expectedSessionId;
+
+  /// 目标会话没有本地缓存时先显示骨架，且暂不订阅 SSE。
+  final bool pending;
+
+  /// 只读预览：看的是历史会话，后端仍停在原会话上。
+  /// 此时不切换 runtime，只有真的发出新消息才激活。
+  final bool preview;
+
+  /// 发送前激活目标会话；由父级执行，返回 false 表示没切成、不要发送。
+  final Future<bool> Function(String sessionId)? onActivate;
+
+  /// 空态里点「管理模型」时切到工作区的模型标签页。
+  final VoidCallback? onOpenModels;
 
   @override
   State<ChatPanel> createState() => _ChatPanelState();
@@ -122,7 +144,7 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
       _loading = false;
     }
     _scroll.addListener(_onScroll);
-    _bootstrap(seeded: seed != null);
+    _bootstrap(seeded: seed != null, pending: widget.pending);
   }
 
   @override
@@ -148,7 +170,7 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
     }
   }
 
-  Future<void> _bootstrap({bool seeded = false}) async {
+  Future<void> _bootstrap({bool seeded = false, bool pending = false}) async {
     if (seeded) {
       _scrollToBottom(animate: false);
     } else {
@@ -170,14 +192,29 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
       }
     }
 
+    // 预览缓存还没读回来时先不连 SSE，骨架窗口里没有可展示的事件。
+    // 连上之后后端会按 ?session= 过滤：看历史会话时不会收到当前会话的
+    // token，激活目标会话后同一条连接会自然开始收事件，无需重建。
+    if (pending) return;
+
     _subscription = appState.client
-        .events(widget.agent.id)
+        .events(widget.agent.id, sessionId: widget.expectedSessionId)
         .listen(
           (event) {
             if (!mounted) return;
             final type = event['type'];
             final payload = event['state'];
             if (type == 'state' && payload is Map<String, dynamic>) {
+              // 切换窗口里旧连接仍可能推来上一个会话的快照。先看轻量的
+              // sessionId，不匹配就直接丢，连全量 fromJson 都省掉。
+              final incomingId = payload['sessionId'];
+              final expected = widget.expectedSessionId;
+              if (expected != null &&
+                  incomingId is String &&
+                  incomingId.isNotEmpty &&
+                  incomingId != expected) {
+                return;
+              }
               final next = AgentState.fromJson(payload);
               final wasBusy = _state.busy;
               final grew = next.messages.length > _state.messages.length;
@@ -303,9 +340,26 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
     });
   }
 
+  /// 预览态只在真的要发消息时才切后端会话。点侧栏看历史不付这个代价，
+  /// 切换期间后端事件仍按会话号过滤，激活成功后同一条 SSE 会自然接上。
+  Future<bool> _ensureActive() async {
+    if (!widget.preview) return true;
+    final id = widget.expectedSessionId;
+    final activate = widget.onActivate;
+    if (id == null || activate == null) return true;
+    try {
+      return await activate(id);
+    } on ApiException catch (exception) {
+      if (mounted) setState(() => _error = exception.message);
+      return false;
+    }
+  }
+
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _state.busy) return;
+    // 激活失败时保留输入，别让用户白打一遍。
+    if (!await _ensureActive()) return;
     _input.clear();
     _resetStream();
     _live.value = _live.value.copyWith(streamText: '', thinking: false);
@@ -334,6 +388,7 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
       if (message.isUser) lastUser = message;
     }
     if (lastUser == null || _state.busy) return;
+    if (!await _ensureActive()) return;
     _resetStream();
     _live.value = _live.value.copyWith(streamText: '', thinking: false);
     setState(() => _error = null);
@@ -345,18 +400,12 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
     _scrollToBottom();
   }
 
-  void _pickSuggestion(String text) {
-    _input.text = text;
-    _input.selection = TextSelection.collapsed(offset: text.length);
-    _inputFocus.requestFocus();
-    setState(() {});
-  }
-
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
 
-    if (_loading) return const _ChatSkeleton();
+    // 切换到没缓存的会话时立刻显示骨架，不再把旧会话画面留在原地。
+    if (widget.pending || _loading) return const _ChatSkeleton();
 
     final messages = _state.messages;
     // 模型调用失败已经由对应的消息卡片原样展示，顶部不再重复；
@@ -392,10 +441,10 @@ class _ChatPanelState extends State<ChatPanel> with TickerProviderStateMixin {
                   live.streamText.isEmpty &&
                   !live.thinking;
               if (showEmpty) {
-                return _EmptyChat(
+                return ChatEmptyState(
                   agent: widget.agent,
-                  modelLabel: _state.modelLabel,
-                  onPick: _pickSuggestion,
+                  runtimeModelLabel: _state.modelLabel,
+                  onOpenModels: widget.onOpenModels,
                 );
               }
               return Stack(
@@ -1616,277 +1665,6 @@ class _SendButtonState extends State<_SendButton> {
               const SizedBox(width: FanxSpace.xs + 1),
               Icon(widget.icon, size: 13, color: foreground),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 空态
-// ---------------------------------------------------------------------------
-
-class _EmptyChat extends StatelessWidget {
-  const _EmptyChat({
-    required this.agent,
-    required this.modelLabel,
-    required this.onPick,
-  });
-
-  final Agent agent;
-  final String? modelLabel;
-  final ValueChanged<String> onPick;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final initial = agent.name.isEmpty ? '?' : agent.name.characters.first;
-
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(FanxSpace.xl),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 620),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Reveal(
-                index: 0,
-                child: Row(
-                  children: [
-                    Container(
-                      width: 34,
-                      height: 34,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: t.accent,
-                        borderRadius: BorderRadius.circular(FanxRadius.sm),
-                      ),
-                      child: Text(
-                        initial,
-                        style: TextStyle(
-                          fontFamilyFallback: FanxFonts.fallback,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                          color: t.onAccent,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: FanxSpace.md),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            agent.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: context.cnDisplay(size: 22, height: 1.3),
-                          ),
-                          Text(
-                            agent.description.isEmpty
-                                ? '这个会话还是空的'
-                                : agent.description,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: context.texts.bodySmall?.copyWith(
-                              fontSize: 11.5,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: FanxSpace.lg),
-              Reveal(
-                index: 1,
-                child: Wrap(
-                  spacing: FanxSpace.sm,
-                  runSpacing: FanxSpace.sm,
-                  children: [
-                    _Fact(icon: Icons.memory, value: modelLabel ?? '未选模型'),
-                    _Fact(
-                      icon: Icons.bolt_outlined,
-                      value: '${agent.skills} 技能',
-                    ),
-                    _Fact(
-                      icon: Icons.extension_outlined,
-                      value: '${agent.extensions} 扩展',
-                    ),
-                    _Fact(
-                      icon: Icons.article_outlined,
-                      value: '${agent.prompts} 模板',
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: FanxSpace.xl),
-              Reveal(
-                index: 2,
-                child: Row(
-                  children: [
-                    MetaTag('START WITH / 从这里开始', size: 8.5, tracking: 1.7),
-                    const SizedBox(width: FanxSpace.sm),
-                    Expanded(child: HairLine(color: t.border)),
-                  ],
-                ),
-              ),
-              const SizedBox(height: FanxSpace.sm),
-              for (var index = 0; index < _suggestions.length; index++)
-                Reveal(
-                  index: 3 + index,
-                  child: _SuggestionCard(
-                    index: index + 1,
-                    title: _suggestions[index].$1,
-                    hint: _suggestions[index].$2,
-                    onTap: () => onPick(_suggestions[index].$1),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  static const List<(String, String)> _suggestions = [
-    ('先摸清这个项目的结构，给我模块边界和风险点', '适合刚接手的代码库'),
-    ('把这个流程整理成一个技能，写进我的 skills/', '把重复动作固化成能力'),
-    ('解释下面这段报错，先定位原因再给修法', '贴上报错再发送'),
-  ];
-}
-
-class _Fact extends StatelessWidget {
-  const _Fact({required this.icon, required this.value});
-
-  final IconData icon;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: FanxSpace.sm + 2,
-        vertical: FanxSpace.xs + 1,
-      ),
-      decoration: BoxDecoration(
-        color: t.surface,
-        borderRadius: BorderRadius.circular(FanxRadius.xs),
-        border: Border.all(color: t.border),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 10, color: t.textFaint),
-          const SizedBox(width: FanxSpace.xs + 1),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 200),
-            child: Text(
-              value,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: context.mono(size: 10, color: t.textMuted),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SuggestionCard extends StatefulWidget {
-  const _SuggestionCard({
-    required this.index,
-    required this.title,
-    required this.hint,
-    required this.onTap,
-  });
-
-  final int index;
-  final String title;
-  final String hint;
-  final VoidCallback onTap;
-
-  @override
-  State<_SuggestionCard> createState() => _SuggestionCardState();
-}
-
-class _SuggestionCardState extends State<_SuggestionCard> {
-  bool _hover = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-
-    return Padding(
-      padding: const EdgeInsets.only(top: FanxSpace.sm),
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        onEnter: (_) => setState(() => _hover = true),
-        onExit: (_) => setState(() => _hover = false),
-        child: GestureDetector(
-          onTap: widget.onTap,
-          child: AnimatedContainer(
-            duration: FanxMotion.fast,
-            padding: const EdgeInsets.symmetric(
-              horizontal: FanxSpace.md,
-              vertical: FanxSpace.md,
-            ),
-            decoration: BoxDecoration(
-              color: _hover ? t.surfaceRaised : t.surface,
-              borderRadius: BorderRadius.circular(FanxRadius.sm),
-              border: Border.all(
-                color: _hover ? t.accent.withValues(alpha: 0.5) : t.border,
-              ),
-            ),
-            child: Row(
-              children: [
-                Text(
-                  '${widget.index}'.padLeft(2, '0'),
-                  style: context.mono(
-                    size: 10,
-                    color: _hover ? t.accent : t.textFaint,
-                  ),
-                ),
-                const SizedBox(width: FanxSpace.md),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        widget.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: context.texts.bodyMedium?.copyWith(
-                          color: t.text,
-                          height: 1.5,
-                        ),
-                      ),
-                      const SizedBox(height: 1),
-                      Text(
-                        widget.hint,
-                        style: context.texts.bodySmall?.copyWith(
-                          fontSize: 10.5,
-                          color: t.textFaint,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: FanxSpace.sm),
-                Icon(
-                  Icons.north_east,
-                  size: 13,
-                  color: _hover ? t.accent : t.textFaint,
-                ),
-              ],
-            ),
           ),
         ),
       ),

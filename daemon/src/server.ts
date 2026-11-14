@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { AgentSessionRuntime } from "@earendil-works/pi-coding-agent";
 import { createAgentRuntime, describeEffectiveResources } from "./runtime.ts";
@@ -75,29 +75,69 @@ interface LibraryRow {
   }[];
 }
 
+type SessionRow = {
+  id: string;
+  name: string;
+  firstMessage: unknown;
+  modified: unknown;
+  messageCount: unknown;
+};
+
+/**
+ * 会话目录的轻量签名：只看文件名、大小与 mtime，不读文件内容。
+ * SDK 的 SessionManager.list 会把每个 JSONL 从头到尾读一遍来拼标题和摘要，
+ * 会话一多就是 N 份完整历史；用这个签名可以在目录没变时复用上次结果。
+ */
+function sessionsSignature(dir: string): string {
+  if (!existsSync(dir)) return "missing";
+  const parts: string[] = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".jsonl")) continue;
+    try {
+      const stat = statSync(join(dir, name));
+      parts.push(`${name}:${stat.size}:${stat.mtimeMs}`);
+    } catch {
+      // 扫描瞬间被删掉的文件跳过即可，下次签名自然会变。
+    }
+  }
+  parts.sort();
+  return parts.join("|");
+}
+
 export async function startServer(options: ServerOptions = {}) {
   const managed = new Map<string, Managed>();
   const listeners = new Map<string, Set<SseSend>>();
   const busy = new Set<string>();
   const lastStateJson = new Map<string, string>();
+  const sessionListCache = new Map<string, { signature: string; rows: SessionRow[] }>();
+  // 只读预览缓存：key 是 JSONL 路径，签名用 size+mtime，内容没变就不重读盘。
+  const sessionPreviewCache = new Map<string, { signature: string; messages: unknown[] }>();
 
   function broadcast(agentId: string, payload: unknown): void {
     const set = listeners.get(agentId);
     if (!set) return;
+    // 每个事件都带上产生它的会话号。前端订阅 SSE 时会带 ?session=，
+    // 这样预览历史会话时不会把另一个会话的 token / state 串到画面上。
+    const event: Record<string, unknown> = {
+      ...(payload as Record<string, unknown>),
+      sessionId: managed.get(agentId)?.runtime.session.sessionId ?? null,
+    };
     // 一轮对话里 message_end / agent_end / finally 会连推数份 state，每份都
     // 带全量消息历史。内容完全相同的那几份直接丢掉，避免前端反复全量解析。
-    // 新 SSE 连接用 send() 直发，不走这里，不会因去重漏掉初始快照。
-    if ((payload as { type?: string }).type === "state") {
-      const encoded = JSON.stringify(payload);
+    // 新 SSE 连接用 rawSend() 直发，不走这里，不会因去重漏掉初始快照。
+    if (event.type === "state") {
+      const encoded = JSON.stringify(event);
       if (encoded === lastStateJson.get(agentId)) return;
       lastStateJson.set(agentId, encoded);
     }
-    for (const send of set) send(payload);
+    for (const send of set) send(event);
   }
 
   function agentState(agent: AgentRecord) {
     const entry = managed.get(agent.id);
-    if (!entry) return { running: false as const, busy: false, messages: [] };
+    if (!entry) {
+      return { running: false as const, busy: false, messages: [], sessionId: null };
+    }
     const session = entry.runtime.session;
     const model = session.model;
     return {
@@ -731,16 +771,25 @@ export async function startServer(options: ServerOptions = {}) {
       const activeId = managed.get(agentId)?.runtime.session.sessionId;
 
       if (parts.length === 4 && req.method === "GET") {
-        const list = await SessionManager.list(agent.cwd, sessionsDir);
-        return json({
-          sessions: list.map((item) => ({
+        const signature = sessionsSignature(sessionsDir);
+        const cached = sessionListCache.get(agentId);
+        let rows: SessionRow[];
+        if (cached && cached.signature === signature) {
+          rows = cached.rows;
+        } else {
+          const list = await SessionManager.list(agent.cwd, sessionsDir);
+          rows = list.map((item) => ({
             id: item.id,
             name: item.name ?? "",
             firstMessage: item.firstMessage,
             modified: item.modified,
             messageCount: item.messageCount,
-            active: item.id === activeId,
-          })),
+          }));
+          sessionListCache.set(agentId, { signature, rows });
+        }
+        // active 是运行时状态，不随文件内容变化，每次按当前会话重算。
+        return json({
+          sessions: rows.map((row) => ({ ...row, active: row.id === activeId })),
         });
       }
 
@@ -752,11 +801,60 @@ export async function startServer(options: ServerOptions = {}) {
         }
         const result = await entry.runtime.newSession();
         if (result.cancelled) throw new HttpError(409, "新建会话被取消");
-        broadcast(agentId, { type: "state", state: agentState(agent) });
-        return json({ ok: true, state: agentState(agent) });
+        // 全量 state 只组一次：broadcast 要序列化一遍，HTTP 响应又是一遍。
+        const state = agentState(agent);
+        broadcast(agentId, { type: "state", state });
+        return json({ ok: true, state });
       }
 
-      // 切到历史会话
+      // 只读预览：直接读目标 JSONL 的历史，不切换 runtime、不重建 AgentSession。
+      // 「点开看看」与「在这个会话里继续聊」是两件事，前者不该付切换的代价。
+      if (parts.length === 6 && parts[5] === "state" && req.method === "GET") {
+        const sessionId = parts[4]!;
+        const path = SessionManager.findById(agent.cwd, sessionId, sessionsDir);
+        if (!path || !existsSync(path)) throw new HttpError(404, "会话不存在");
+
+        let signature: string;
+        try {
+          const stat = statSync(path);
+          signature = `${stat.size}:${stat.mtimeMs}`;
+        } catch {
+          throw new HttpError(404, "会话不存在");
+        }
+        const cached = sessionPreviewCache.get(path);
+        let messages: unknown[];
+        if (cached && cached.signature === signature) {
+          messages = cached.messages;
+        } else {
+          const manager = SessionManager.open(path, sessionsDir, agent.cwd);
+          messages = manager.buildSessionContext().messages as unknown[];
+          sessionPreviewCache.set(path, { signature, messages });
+          while (sessionPreviewCache.size > 24) {
+            const oldest = sessionPreviewCache.keys().next().value;
+            if (oldest === undefined) break;
+            sessionPreviewCache.delete(oldest);
+          }
+        }
+
+        const runtime = managed.get(agentId)?.runtime.session;
+        const model = runtime?.model;
+        return json({
+          running: runtime != null,
+          busy: busy.has(agentId) || (runtime?.isStreaming ?? false),
+          sessionId,
+          sessionName: "",
+          model:
+            model && model.id !== "unknown"
+              ? { provider: model.provider, id: model.id, name: model.name }
+              : null,
+          messages,
+          lastError: null,
+          // 前端据此显示「预览中」提示；发送第一条新消息时才会真正激活。
+          readOnly: sessionId !== runtime?.sessionId,
+        });
+      }
+
+      // 切到历史会话：只有用户真的要在这个会话里发消息时才调用。
       if (parts.length === 6 && parts[5] === "activate" && req.method === "POST") {
         const sessionId = parts[4]!;
         const entry = await ensureRuntime(agent);
@@ -770,8 +868,10 @@ export async function startServer(options: ServerOptions = {}) {
         if (!path || !existsSync(path)) throw new HttpError(404, "会话不存在");
         const result = await entry.runtime.switchSession(path);
         if (result.cancelled) throw new HttpError(409, "切换会话被取消");
-        broadcast(agentId, { type: "state", state: agentState(agent) });
-        return json({ ok: true, state: agentState(agent) });
+        // 全量 state 只组一次：broadcast 要序列化一遍，HTTP 响应又是一遍。
+        const state = agentState(agent);
+        broadcast(agentId, { type: "state", state });
+        return json({ ok: true, state });
       }
 
       // 删除会话：直接删 JSONL 文件。删的是当前会话时，顺手新建一个空会话顶上。
@@ -888,6 +988,9 @@ export async function startServer(options: ServerOptions = {}) {
 
     // /api/agents/:id/events
     if (parts[3] === "events" && req.method === "GET") {
+      // 乐观切换时前端已经画了目标会话的缓存，后端此刻还在旧会话上。
+      // 带上期望会话号就不会再推一份旧会话的全量历史过去。
+      const expectedSession = new URL(req.url).searchParams.get("session");
       let cleanup = () => {};
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -895,13 +998,26 @@ export async function startServer(options: ServerOptions = {}) {
           let ended = false;
           let heartbeat: ReturnType<typeof setInterval>;
 
-          const send: SseSend = (payload) => {
+          const rawSend: SseSend = (payload) => {
             if (ended) return;
             try {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
             } catch {
               cleanup();
             }
+          };
+
+          // 广播入口严格按订阅时期望的会话过滤：用户只是「点开看历史」时，
+          // 后端仍在别的会话上跑，delta / state 一条都不该送到这个视图。
+          // 真正激活该会话后 sessionId 变成期望值，同一条连接会自然开始收事件。
+          const send: SseSend = (payload) => {
+            if (
+              expectedSession &&
+              (payload as { sessionId?: unknown }).sessionId !== expectedSession
+            ) {
+              return;
+            }
+            rawSend(payload);
           };
 
           cleanup = () => {
@@ -921,9 +1037,13 @@ export async function startServer(options: ServerOptions = {}) {
           set.add(send);
           listeners.set(agentId, set);
           req.signal.addEventListener("abort", cleanup, { once: true });
-          heartbeat = setInterval(() => send({ type: "heartbeat" }), 15_000);
+          heartbeat = setInterval(() => rawSend({ type: "heartbeat" }), 15_000);
 
-          send({ type: "state", state: agentState(agent) });
+          // 初始快照直发：预览的是历史会话时不推旧会话的全量消息历史。
+          const snapshot = agentState(agent);
+          if (!expectedSession || expectedSession === snapshot.sessionId) {
+            rawSend({ type: "state", state: snapshot });
+          }
         },
         cancel() {
           cleanup();

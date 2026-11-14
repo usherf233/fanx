@@ -337,6 +337,7 @@ void main() {
     required Map<String, dynamic> payload,
     Size size = const Size(1200, 900),
     List<String>? sent,
+    List<String>? modelSelections,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1.0;
@@ -364,6 +365,80 @@ void main() {
         return http.Response(
           '{"accepted":true}',
           202,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      // 空态读的是真实配置（models.json + 资源快照），不是运行时 state。
+      if (path.endsWith('/models')) {
+        return http.Response(
+          jsonEncode({
+            'providers': [
+              {
+                'id': 'local',
+                'name': 'Local',
+                'baseUrl': 'http://127.0.0.1:11434',
+                'api': 'openai',
+                'models': [
+                  {'id': 'qwen3:8b', 'name': 'Qwen3 8B'},
+                  {'id': 'gpt-4o', 'name': 'GPT-4o'},
+                ],
+              },
+            ],
+            'defaultProvider': 'local',
+            'defaultModel': 'qwen3:8b',
+            'active': null,
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (path.endsWith('/resources')) {
+        return http.Response(
+          jsonEncode({
+            'skills': [
+              {
+                'name': 'code-review',
+                'description': '代码评审流程',
+                'kind': 'skill',
+                'enabled': true,
+                'relPath': 'skills/code-review',
+              },
+              {
+                'name': 'flutter-perf',
+                'description': '性能排查',
+                'kind': 'skill',
+                'enabled': true,
+                'relPath': 'skills/flutter-perf',
+              },
+            ],
+            'extensions': [
+              {
+                'name': 'shell-tools',
+                'description': '终端工具',
+                'kind': 'extension',
+                'enabled': true,
+                'relPath': 'extensions/shell-tools.ts',
+              },
+            ],
+            'prompts': [
+              {
+                'name': 'review',
+                'description': '评审模板',
+                'kind': 'prompt',
+                'enabled': false,
+                'relPath': 'prompts/review.md',
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (path.endsWith('/model') && request.method == 'PUT') {
+        modelSelections?.add(request.body);
+        return http.Response(
+          '{"ok":true}',
+          200,
           headers: {'content-type': 'application/json'},
         );
       }
@@ -521,20 +596,44 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('空态给角色、读数与可点建议', (tester) async {
+  testWidgets('空态列出真实模型与资源名称，不再有示例卡', (tester) async {
     await pumpChat(tester, payload: state(messages: <Object>[]));
+    await tester.pumpAndSettle();
 
     expect(find.text('编码 Agent'), findsWidgets);
-    expect(find.text('2 技能'), findsOneWidget);
-    expect(find.textContaining('先摸清这个项目的结构'), findsOneWidget);
+    // 模型来自配置，而不是「未选模型」：runtime 未启动时 state 不带 model 字段。
+    expect(find.text('local / qwen3:8b'), findsOneWidget);
+    expect(find.text('未选模型'), findsNothing);
+    // 列的是具体名字，不是「2 技能」这种计数。
+    expect(find.text('code-review'), findsOneWidget);
+    expect(find.text('flutter-perf'), findsOneWidget);
+    expect(find.text('shell-tools'), findsOneWidget);
+    expect(find.text('review'), findsOneWidget);
+    expect(find.text('停用'), findsOneWidget);
+    // 旧的三条示例提示已移除。
+    expect(find.textContaining('先摸清这个项目的结构'), findsNothing);
+    expect(find.textContaining('从这里开始'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
-    await tester.tap(find.textContaining('先摸清这个项目的结构'));
-    await tester.pump();
+  testWidgets('空态模型行可直接切换', (tester) async {
+    final selected = <String>[];
+    await pumpChat(
+      tester,
+      payload: state(messages: <Object>[]),
+      modelSelections: selected,
+    );
+    await tester.pumpAndSettle();
 
-    final field = tester.widget<TextField>(find.byType(TextField));
-    expect(field.controller!.text, contains('模块边界'));
-    // Reveal 用 Future.delayed 错峰入场，等它跑完再收尾，避免 pending timer。
-    await tester.pump(const Duration(seconds: 1));
+    await tester.tap(find.text('local / qwen3:8b'));
+    await tester.pumpAndSettle();
+    expect(find.text('local / gpt-4o'), findsOneWidget);
+
+    await tester.tap(find.text('local / gpt-4o'));
+    await tester.pumpAndSettle();
+    expect(selected.length, 1);
+    expect(selected.single, contains('gpt-4o'));
+    expect(find.text('已切换到 local / gpt-4o'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -660,6 +759,100 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('切换窗口里旧会话的 SSE 快照不会盖到新会话上', (tester) async {
+    final controller = StreamController<Map<String, dynamic>>();
+    addTearDown(controller.close);
+    appState = AppState(_FakeStreamClient(controller))..loading = false;
+    final agent = Agent.fromJson({
+      'id': 'coding',
+      'name': '编码 Agent',
+      'description': '',
+      'configDir': 'C:/agents/coding',
+      'cwd': 'E:/fanx',
+      'running': true,
+    });
+    String? notifiedSessionId;
+    int? notifiedCount;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light,
+        home: Scaffold(
+          body: ChatPanel(
+            agent: agent,
+            initialState: AgentState.fromJson({
+              'running': true,
+              'busy': false,
+              'sessionId': 's2',
+              'messages': [],
+            }),
+            expectedSessionId: 's2',
+            onState: (state) {
+              notifiedSessionId = state.sessionId;
+              notifiedCount = state.messages.length;
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    Map<String, dynamic> stateEvent(String sessionId, String text) => {
+      'type': 'state',
+      'state': {
+        'running': true,
+        'busy': false,
+        'sessionId': sessionId,
+        'messages': [
+          {
+            'role': 'assistant',
+            'content': [
+              {'type': 'text', 'text': text},
+            ],
+          },
+        ],
+      },
+    };
+
+    controller.add(stateEvent('s1', '旧会话内容'));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('旧会话内容'), findsNothing);
+    expect(notifiedSessionId, isNull);
+
+    controller.add(stateEvent('s2', '新会话内容'));
+    await tester.pump();
+    await tester.pump();
+    // 空态退场时 _Reveal 会按序号排 0~350ms 的延时动画，走完再结束用例。
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(notifiedSessionId, 's2');
+    expect(notifiedCount, 1);
+    expect(
+      find.textContaining('新会话内容', findRichText: true),
+      findsWidgets,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  test('events 带上期望会话号，避免后端推旧会话快照', () async {
+    Uri? captured;
+    final client = DaemonClient(
+      base: Uri.parse('http://127.0.0.1:4317'),
+      httpClient: MockClient((request) async {
+        captured = request.url;
+        return http.Response(
+          '',
+          200,
+          headers: {'content-type': 'text/event-stream'},
+        );
+      }),
+    );
+    addTearDown(client.dispose);
+
+    await client.events('coding', sessionId: 's2').listen((_) {}).asFuture<void>();
+    expect(captured?.queryParameters['session'], 's2');
+  });
 }
 
 class _FakeStreamClient extends DaemonClient {
@@ -669,7 +862,8 @@ class _FakeStreamClient extends DaemonClient {
   final StreamController<Map<String, dynamic>> controller;
 
   @override
-  Stream<Map<String, dynamic>> events(String id) => controller.stream;
+  Stream<Map<String, dynamic>> events(String id, {String? sessionId}) =>
+      controller.stream;
 
   @override
   Future<AgentState> getState(String id) async => AgentState.empty;

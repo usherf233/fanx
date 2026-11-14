@@ -360,6 +360,17 @@ class DaemonClient {
     await _request('POST', '/api/agents/$id/sessions');
   }
 
+  /// 只读预览某个会话的历史：不切换后端当前会话。
+  /// 点侧栏「看看」走这条，只有发消息时才走 [activateSession]。
+  Future<AgentState?> sessionState(String id, String sessionId) async {
+    final result = await _request(
+      'GET',
+      '/api/agents/$id/sessions/$sessionId/state',
+    );
+    if (result is! Map<String, dynamic>) return null;
+    return AgentState.fromJson(result);
+  }
+
   /// 切换当前会话。daemon 会把切换后的完整状态一起返回，
   /// 所以调用方不需要再补一次 getState。
   Future<AgentState?> activateSession(String id, String sessionId) async {
@@ -400,8 +411,17 @@ class DaemonClient {
   }
 
   /// 订阅某个 Agent 的事件流。调用方取消订阅时 Stream 结束。
-  Stream<Map<String, dynamic>> events(String id) async* {
-    final request = http.Request('GET', _resolve('/api/agents/$id/events'));
+  ///
+  /// [sessionId] 是期望的会话号：乐观切换期间后端可能还停在旧会话，带上它
+  /// 后 daemon 不会再推一份旧会话的全量初始快照过来。
+  Stream<Map<String, dynamic>> events(String id, {String? sessionId}) async* {
+    final request = http.Request(
+      'GET',
+      _resolve(
+        '/api/agents/$id/events',
+        sessionId == null ? null : {'session': sessionId},
+      ),
+    );
     request.headers['Accept'] = 'text/event-stream';
     final response = await _client.send(request);
     if (response.statusCode >= 400) {
